@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- App-specific external storage: this is the scoped-storage location the model
+         downloader writes to. No MANAGE_EXTERNAL_STORAGE permission is needed, which
+         keeps Vani compatible with Android 11+ scoped storage without a Play Store
+         Declarations problem. -->
+    <external-files-path name="models" path="models/" />
+    <external-files-path name="downloads" path="downloads/" />
+    <files-path name="cache" path="cache/" />
+    <cache-path name="tmp" path="tmp/" />
+</paths>

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Adaptive launcher icon: deep black field with a soft white orb. -->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/launcher_bg" />
+    <foreground android:drawable="@drawable/ic_launcher_foreground" />
+    <!-- Disable the monochrome tint: Vani's orb is deliberately soft white/blue, and a
+         black silhouette launcher would lose it. -->
+    <monochrome android:drawable="@drawable/ic_launcher_foreground" />
+</adaptive-icon>

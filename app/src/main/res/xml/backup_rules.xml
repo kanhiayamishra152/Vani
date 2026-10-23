@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Backup rules.
+
+  Vani stores models in app-specific external storage, which Android already excludes from
+  Auto Backup by default. The explicit rule below makes that intent unambiguous: models are
+  large, re-downloadable, and contain nothing that should travel with the user's backup.
+-->
+<full-backup-content>
+    <!-- App-specific external files (models) are never backed up. -->
+    <exclude domain="external-files" path="models/" />
+    <exclude domain="external-files" path="downloads/" />
+    <exclude domain="external-files" path="_downloads/" />
+    <!-- Cache is transient. -->
+    <exclude domain="cache" path="." />
+    <exclude domain="root" path="cache/" />
+</full-backup-content>

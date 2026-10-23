@@ -1,0 +1,34 @@
+# ---- Gradle / Android ----
+.gradle/
+build/
+local.properties
+keystore.properties
+*.iml
+.idea/
+captures/
+
+# ---- Native ----
+# Third-party C/C++ sources are pulled in as git submodules (see .gitmodules) and are
+# NOT vendored into this tree, so they must never be committed.
+app/src/main/cpp/third_party/llama.cpp/
+app/src/main/cpp/third_party/sherpa-onnx/
+app/src/main/cpp/third_party/onnxruntime/
+*.o
+*.a
+*.so
+
+# ---- Downloaded models (scoped storage at runtime, but keep local scratch out) ----
+models/
+*.gguf
+*.onnx
+*.bin
+
+# ---- Tooling artifacts produced in this repo ----
+tools/out/
+*.apk
+*.aab
+*.zip
+
+# ---- OS ----
+.DS_Store
+Thumbs.db

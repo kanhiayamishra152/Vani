@@ -1,0 +1,85 @@
+name: Android Build
+
+# Builds the release APK on every push so there is always a signed artefact to download,
+# rather than only on release.
+on:
+  push:
+    branches: [ main, master, arena/** ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Assemble Release APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        # The native engines are submodules; without this the CMake step fails.
+        with:
+          submodules: recursive
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ hashFiles('**/*.gradle.kts', 'gradle/libs.versions.toml') }}
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Accept SDK licences
+        run: |
+          mkdir -p $ANDROID_SDK_ROOT/licenses
+          printf '\n8933bad161af4178b1185d1a37fbf41ea5269c55\nd56f5187479451eabf01fb78af6dfcb131a6481e\n24333f8a63b6825ea9c5514f83c2829b004d1fee\n' \
+            > $ANDROID_SDK_ROOT/licenses/android-sdk-license
+          printf '\n84831b9409646a918e30573bab4c9c91346d8abd\n' \
+            > $ANDROID_SDK_ROOT/licenses/android-sdk-preview-license
+
+      - name: Build release APK
+        run: ./gradlew :app:assembleRelease --no-daemon --stacktrace
+
+      - name: Build debug APK
+        run: ./gradlew :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Run downloader unit tests
+        # The downloader tests are pure JVM + MockWebServer, so they run before any
+        # device-dependent work and catch regressions in the redirect/Range logic.
+        run: ./gradlew :app:testDebugUnitTest --no-daemon --stacktrace
+
+      - name: Upload release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: vani-release-arm64-v8a
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: vani-debug-arm64-v8a
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+
+  # Fails the build early if the generated orb animations are not loop-seamless.
+  orb-animations:
+    name: Verify orb animations
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out tools
+        run: git checkout -- tools/ 2>/dev/null || true
+      - name: Regenerate and validate
+        run: python3 tools/generate_orb_animations.py
+      - name: Confirm assets are unchanged
+        run: |
+          if [ -n "$(git status --porcelain app/src/main/assets/animations)" ]; then
+            echo "Orb animations drifted from the generator."
+            git --no-pager diff --stat app/src/main/assets/animations
+            exit 1
+          fi

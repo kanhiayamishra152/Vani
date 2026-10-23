@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Launcher foreground: a soft white orb with a thin blue halo ring.
+
+  Drawn as a vector so it scales crisply on every density without shipping a PNG per
+  density bucket. Keeps the mark consistent with the in-app orb (see the Lottie assets
+  in assets/animations/).
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Halo -->
+    <path
+        android:fillColor="#A8C4F0"
+        android:fillAlpha="0.35"
+        android:pathData="M54,30 m-24,0 a24,24 0 1,0 48,0 a24,24 0 1,0 -48,0" />
+
+    <!-- Core orb -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,38 m-15,0 a15,15 0 1,0 30,0 a15,15 0 1,0 -30,0" />
+</vector>

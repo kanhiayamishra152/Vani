@@ -1,0 +1,24 @@
+; Vani AI - pinned third-party native dependencies.
+;
+; These are NOT vendored into the tree. They are git submodules fetched at build time
+; by `git submodule update --init --recursive`, which keeps this repository small and
+; makes the exact engine revisions auditable.
+;
+; Pinned revisions (verified against the upstream headers while writing the JNI bridge):
+;   llama.cpp   4231b23dc2c46661d01157aac5245bdcf03ce4b1  (v0.7.0-dev)
+;   sherpa-onnx 8abb7c8f87eae85b2e75f9a4115236c978980add  (v2.0.0)
+;
+; IMPORTANT: sherpa-onnx v2.0.0 changed its C API. The streaming recognizer is now
+; SherpaOnnxCreateOnlineRecognizer + SherpaOnnxOnlineStreamAcceptWaveform +
+; SherpaOnnxDecodeOnlineStream + SherpaOnnxGetOnlineStreamResult, and the offline
+; recognizer uses SherpaOnnxAcceptWaveformOffline + SherpaOnnxDecodeOfflineStream.
+; Do not port code written against the pre-2.0 names (SherpaOnnxAcceptWaveform /
+; SherpaOnnxGetResult) - it will not compile.
+
+[submodule "third_party/llama.cpp"]
+	path = app/src/main/cpp/third_party/llama.cpp
+	url = https://github.com/ggml-org/llama.cpp.git
+
+[submodule "third_party/sherpa-onnx"]
+	path = app/src/main/cpp/third_party/sherpa-onnx
+	url = https://github.com/k2-fsa/sherpa-onnx.git

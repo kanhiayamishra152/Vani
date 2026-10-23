@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Data extraction rules (Android 12+).
+
+  Mirrors backup_rules.xml: models are large and re-downloadable, so they are excluded from
+  both Auto Backup and Android's data-extraction flows.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="external-files" path="models/" />
+        <exclude domain="external-files" path="downloads/" />
+        <exclude domain="external-files" path="_downloads/" />
+        <exclude domain="cache" path="." />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="external-files" path="models/" />
+        <exclude domain="external-files" path="downloads/" />
+        <exclude domain="external-files" path="_downloads/" />
+        <exclude domain="cache" path="." />
+    </device-transfer>
+</data-extraction-rules>

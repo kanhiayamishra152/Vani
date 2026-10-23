@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Base theme is intentionally a plain dark theme. All custom colouring happens in
+         Compose so the orb, bubbles and chat surface stay consistent with the design
+         system defined in ai.vani.ui.theme. -->
+    <style name="Theme.Vani" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/bg_base</item>
+        <item name="android:colorBackground">@color/bg_base</item>
+        <item name="android:windowActionBar">false</item>
+        <item name="android:windowLightStatusBar" tools:targetApi="m">false</item>
+        <item name="android:statusBarColor">@color/bg_base</item>
+        <item name="android:navigationBarColor">@color/bg_base</item>
+        <item name="android:windowLightNavigationBar" tools:targetApi="o_mr1">false</item>
+        <item name="android:enforceNavigationBarContrast" tools:targetApi="q">false</item>
+        <item name="android:enforceStatusBarContrast" tools:targetApi="q">false</item>
+    </style>
+
+    <!-- Splash / launch theme. Keeps the deep-black screen up while Compose draws, so
+         the user never sees a white flash on cold start. -->
+    <style name="Theme.Vani.Launch" parent="Theme.Vani">
+        <item name="android:windowBackground">@color/bg_base</item>
+    </style>
+
+</resources>

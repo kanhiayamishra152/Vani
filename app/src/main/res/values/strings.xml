@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Vani</string>
+
+    <!-- ---- Navigation ---- -->
+    <string name="nav_voice">Voice</string>
+    <string name="nav_chat">Chat</string>
+    <string name="nav_models">Models</string>
+    <string name="nav_settings">Settings</string>
+
+    <!-- ---- Voice screen ---- -->
+    <string name="voice_hint">Tap and hold, or tap to start listening</string>
+    <string name="voice_state_idle">Tap to talk</string>
+    <string name="voice_state_listening">Listening…</string>
+    <string name="voice_state_thinking">Thinking…</string>
+    <string name="voice_state_speaking">Speaking…</string>
+    <string name="voice_barge_in">Interrupted</string>
+
+    <!-- ---- Models screen ---- -->
+    <string name="models_title">Model Hub</string>
+    <string name="models_subtitle">Downloaded on-device. Nothing leaves your phone.</string>
+    <string name="models_download">Download</string>
+    <string name="models_downloading">Downloading %1$d%%</string>
+    <string name="models_downloaded">Downloaded</string>
+    <string name="models_verifying">Verifying SHA-256…</string>
+    <string name="models_failed">Failed</string>
+    <string name="models_default_badge">Default</string>
+    <string name="models_english_only_note">English selected by default. Hindi and other languages are available below.</string>
+    <string name="models_empty">No models downloaded yet. Start with the default English LLM.</string>
+    <string name="models_retry">Retry</string>
+    <string name="models_cancel">Cancel</string>
+    <string name="models_pause">Pause</string>
+    <string name="models_resume">Resume</string>
+
+    <!-- ---- Settings ---- -->
+    <string name="settings_title">Settings</string>
+    <string name="settings_engine">Engine</string>
+    <string name="settings_cpu_threads">CPU threads</string>
+    <string name="settings_context_size">Context size</string>
+    <string name="settings_sampler">Sampler</string>
+    <string name="settings_greedy">Greedy</string>
+    <string name="settings_temperature">Temperature</string>
+    <string name="settings_voice">Voice</string>
+    <string name="settings_tts_engine">TTS engine</string>
+    <string name="settings_self_test">Run hardware self-test</string>
+    <string name="settings_self_test_desc">Downloads the default LLM, loads it, and generates exactly 8 tokens.</string>
+    <string name="settings_self_test_running">Running self-test…</string>
+    <string name="settings_about">About</string>
+    <string name="settings_version">Version</string>
+    <string name="settings_offline_note">Vani runs entirely on-device. No cloud API calls are made for inference.</string>
+
+    <!-- ---- Self-test result ---- -->
+    <string name="selftest_passed">SELF-TEST PASSED</string>
+    <string name="selftest_failed">SELF-TEST FAILED: %1$s</string>
+    <string name="selftest_step_download">Downloading LFM 2.5 350M (%1$d MB)…</string>
+    <string name="selftest_step_load">Loading model into memory…</string>
+    <string name="selftest_step_generate">Generating 8 tokens…</string>
+
+    <!-- ---- Permissions ---- -->
+    <string name="perm_rationale_audio">Vani needs microphone access to transcribe your speech on-device.</string>
+    <string name="perm_rationale_notification">Vani shows a foreground notification while listening so you know the mic is open.</string>
+    <string name="perm_granted">Granted</string>
+    <string name="perm_denied">Denied</string>
+    <string name="perm_not_determined">Not asked</string>
+    <string name="perm_retry">Retry</string>
+
+    <!-- ---- Content description ---- -->
+    <string name="cd_orb">Vani orb, currently %1$s</string>
+    <string name="cd_mic_button">Start or stop listening</string>
+    <string name="cd_settings">Settings</string>
+</resources>
