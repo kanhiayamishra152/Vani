@@ -9,6 +9,7 @@ import android.media.AudioTrack
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -64,10 +65,14 @@ class SpeechEngine(
     private var systemTtsReady = false
     private var ttsSpeed = 1.0f
     private var ttsSid = 0
-    @Volatile private var ttsStop = false
-    @Volatile private var audioTrack: AudioTrack? = null
     @Volatile private var currentUtterId: String? = null
     @Volatile private var systemSpeaking = false
+    @Volatile private var activeSpeech: SpeechJob? = null
+
+    private class SpeechJob(val utterId: String) {
+        @Volatile var cancelled: Boolean = false
+        @Volatile var track: AudioTrack? = null
+    }
     private var lastLevelEmit = 0L
     private val levelTicker = object : Runnable {
         override fun run() {
@@ -84,6 +89,8 @@ class SpeechEngine(
     @Volatile private var asrActive = false
     private var asrMode = "vad"
     private var asrEngine = "system"
+    @Volatile private var asrOnce = false
+    @Volatile private var asrErrorRetries = 0
     private var wasSpeech = false
     private val pttBuffer = ArrayList<FloatArray>()
     private var audioBridge: VaniAudioBridge? = null
@@ -105,8 +112,8 @@ class SpeechEngine(
             dir.contains("phonon-ultra") || dir.contains("paradee")
         exec.submit {
             try {
+                stopTts()
                 tts?.release(); tts = null
-                // "phonon" is now a real Piper VITS multi-speaker pack.
                 val normEngine = when (engine) {
                     "phonon" -> "vits"
                     "paradee" -> "kokoro"
@@ -116,21 +123,18 @@ class SpeechEngine(
                 when (normEngine) {
                     "system" -> ensureSystemTts()
                     else -> {
-                        if (dir.isNotEmpty() && File(dir).exists()) {
-                            tts = buildTts(normEngine, File(dir))
+                        if (dir.isEmpty() || !File(dir).exists()) {
+                            throw IllegalStateException("Selected voice is not installed")
                         }
-                        if (tts == null) {
-                            ensureSystemTts()
-                            ev("voice.engineFallback", JSONObject().put("engine", engine))
-                        }
+                        tts = buildTts(normEngine, File(dir))
+                            ?: throw IllegalStateException("Selected voice files are incomplete")
                     }
                 }
                 ok(id)
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
                 Log.e(TAG, "tts configure", e)
                 tts = null
-                ensureSystemTts()
-                ok(id)
+                err(id, e.message ?: "Voice configuration failed")
             }
         }
     }
@@ -145,18 +149,26 @@ class SpeechEngine(
                         systemSpeaking = true
                         main.post(levelTicker)
                     }
-                    override fun onDone(utteranceId: String?) { finishSystemUtter(false) }
-                    @Deprecated("deprecated") override fun onError(utteranceId: String?) { finishSystemUtter(false) }
+                    override fun onDone(utteranceId: String?) { finishSystemUtter(false, utteranceId) }
+                    @Deprecated("deprecated") override fun onError(utteranceId: String?) {
+                        val uid = currentUtterId
+                        if (uid != null && (utteranceId == null || uid == utteranceId)) {
+                            ev("tts.error", JSONObject().put("utterId", uid).put("error", "System speech playback failed"))
+                        }
+                        finishSystemUtter(false, utteranceId)
+                    }
                 })
             }
         }
     }
 
-    private fun finishSystemUtter(interrupted: Boolean) {
+    private fun finishSystemUtter(interrupted: Boolean, expectedId: String? = null) {
         systemSpeaking = false
         main.removeCallbacks(levelTicker)
         val uid = currentUtterId ?: return
+        if (expectedId != null && uid != expectedId) return
         currentUtterId = null
+        activeSpeech = null
         ev("tts.end", JSONObject().put("utterId", uid).put("interrupted", interrupted))
     }
 
@@ -238,35 +250,45 @@ class SpeechEngine(
         if (text.isBlank()) { err(id, "empty text"); return }
         val sid = if (a.has("sid")) a.optInt("sid", ttsSid) else ttsSid
         stopTts()
+        val job = SpeechJob(utterId)
+        activeSpeech = job
         currentUtterId = utterId
-        ttsStop = false
         ok(id)
         ev("tts.start", JSONObject().put("utterId", utterId))
         val engine = ttsEngine
         val neural = tts
-        if (engine != "phonon" && neural != null) {
+        if (engine != "system" && neural != null) {
             exec.submit {
-                var track: AudioTrack? = null
+                var output: AudioTrack? = null
                 var interrupted = false
+                var framesWritten = 0L
+                var sampleRate = 24000
                 try {
-                    val sr = neural.sampleRate()
-                    track = AudioTrack.Builder()
+                    sampleRate = neural.sampleRate()
+                    val minBuffer = AudioTrack.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_FLOAT)
+                    val track = AudioTrack.Builder()
                         .setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
-                        .setAudioFormat(AudioFormat.Builder().setSampleRate(sr).setEncoding(AudioFormat.ENCODING_PCM_FLOAT).setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build())
-                        .setBufferSizeInBytes(AudioTrack.getMinBufferSize(sr, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_FLOAT) * 4)
+                        .setAudioFormat(AudioFormat.Builder().setSampleRate(sampleRate).setEncoding(AudioFormat.ENCODING_PCM_FLOAT).setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build())
+                        .setBufferSizeInBytes(maxOf(minBuffer, 4096) * 2)
                         .setTransferMode(AudioTrack.MODE_STREAM)
                         .build()
-                    audioTrack = track
+                    output = track
+                    job.track = track
                     track.play()
-                    // Paradee uses the same streaming audio callback as every
-                    // other engine, but receives offline phoneme codepoints so
-                    // the <9 MiB pack needs no bundled espeak/lexicon data.
                     fun onSamples(samples: FloatArray): Int {
-                        if (ttsStop) { interrupted = true; return 0 }
-                        track?.write(samples, 0, samples.size, AudioTrack.WRITE_BLOCKING)
+                        if (job.cancelled) { interrupted = true; return 0 }
+                        var offset = 0
+                        while (offset < samples.size && !job.cancelled) {
+                            val written = track.write(samples, offset, samples.size - offset, AudioTrack.WRITE_BLOCKING)
+                            if (written < 0) throw IllegalStateException("AudioTrack write failed: $written")
+                            if (written == 0) return 0
+                            offset += written
+                        }
+                        if (job.cancelled) { interrupted = true; return 0 }
+                        framesWritten += samples.size
                         if (samples.isNotEmpty()) {
                             var sum = 0.0
-                            for (s in samples) sum += s * s
+                            for (sample in samples) sum += sample * sample
                             val rms = sqrt(sum / samples.size).toFloat()
                             val now = System.currentTimeMillis()
                             if (now - lastLevelEmit > 60) {
@@ -282,24 +304,38 @@ class SpeechEngine(
                     } else {
                         neural.generateWithCallback(text = text, sid = sid, speed = ttsSpeed) { samples -> onSamples(samples) }
                     }
-                } catch (e: Exception) {
-                    Log.e(TAG, "neural tts", e)
+                } catch (e: Throwable) {
+                    if (!job.cancelled) {
+                        Log.e(TAG, "neural tts", e)
+                        ev("tts.error", JSONObject().put("utterId", utterId).put("error", e.message ?: "Speech playback failed"))
+                    }
+                    interrupted = interrupted || job.cancelled
                 } finally {
+                    // Let already-buffered audio finish, but never hold a worker
+                    // indefinitely if a device reports a stuck playback head.
+                    val track = output
+                    if (track != null && !job.cancelled) {
+                        val drainMs = (framesWritten * 1000L / sampleRate + 350L).coerceIn(250L, 12000L)
+                        val deadline = SystemClock.elapsedRealtime() + drainMs
+                        while (!job.cancelled && track.playState == AudioTrack.PLAYSTATE_PLAYING &&
+                            track.playbackHeadPosition.toLong() < framesWritten && SystemClock.elapsedRealtime() < deadline) {
+                            SystemClock.sleep(10)
+                        }
+                    }
                     try { track?.stop(); track?.release() } catch (_: Exception) {}
-                    audioTrack = null
-                    if (currentUtterId == utterId) {
-                        currentUtterId = null
-                        ev("tts.end", JSONObject().put("utterId", utterId).put("interrupted", (interrupted || ttsStop)))
+                    job.track = null
+                    if (activeSpeech === job) {
+                        activeSpeech = null
+                        if (currentUtterId == utterId) currentUtterId = null
+                        ev("tts.end", JSONObject().put("utterId", utterId).put("interrupted", interrupted || job.cancelled))
                     }
                 }
             }
-        } else {
-            // System TTS fallback (also covers "system" engine).
+        } else if (engine == "system") {
             main.post {
                 ensureSystemTts()
                 val t = systemTts
                 if (t == null || !systemTtsReady) {
-                    // Retry once after init.
                     main.postDelayed({
                         val t2 = systemTts
                         if (t2 != null && systemTtsReady && currentUtterId == utterId) {
@@ -307,7 +343,7 @@ class SpeechEngine(
                             t2.speak(text, TextToSpeech.QUEUE_FLUSH, null, utterId)
                         } else if (currentUtterId == utterId) {
                             currentUtterId = null
-                            ev("tts.end", JSONObject().put("utterId", utterId).put("interrupted", false))
+                            ev("tts.error", JSONObject().put("utterId", utterId).put("error", "System speech service unavailable"))
                         }
                     }, 700)
                 } else {
@@ -315,6 +351,10 @@ class SpeechEngine(
                     t.speak(text, TextToSpeech.QUEUE_FLUSH, null, utterId)
                 }
             }
+        } else {
+            activeSpeech = null
+            if (currentUtterId == utterId) currentUtterId = null
+            ev("tts.error", JSONObject().put("utterId", utterId).put("error", "Selected voice is not configured"))
         }
     }
 
@@ -322,17 +362,13 @@ class SpeechEngine(
         ev("tts.level", JSONObject().put("utterId", utterId).put("level", level.toDouble()))
     }
 
-    /** Instant native barge-in: kills AudioTrack + system TTS on the spot. */
+    /** Instant native barge-in: kills only the active utterance's track. */
     fun stopTts() {
-        ttsStop = true
-        try { audioTrack?.stop() } catch (_: Exception) {}
+        val job = activeSpeech
+        job?.cancelled = true
+        try { job?.track?.stop() } catch (_: Exception) {}
         try { systemTts?.stop() } catch (_: Exception) {}
         if (systemSpeaking) finishSystemUtter(true)
-        val uid = currentUtterId
-        if (uid != null && ttsEngine != "system" && audioTrack == null && !systemSpeaking) {
-            // Neural generation between chunks: mark interrupted; the worker
-            // loop will emit tts.end when it observes ttsStop.
-        }
     }
 
     /* ============================ ASR ============================ */
@@ -407,11 +443,14 @@ class SpeechEngine(
         val dir = a.optString("dir", "")
         val language = a.optString("language", "en")
         val sensitivity = a.optDouble("sensitivity", 0.5).toFloat()
+        val once = a.optBoolean("once", false)
         exec.submit {
             try {
                 releaseAsrInternal()
                 asrEngine = engine
                 asrMode = mode
+                asrOnce = once
+                asrErrorRetries = 0
                 asrActive = true
                 wasSpeech = false
                 pttBuffer.clear()
@@ -472,7 +511,7 @@ class SpeechEngine(
             val r = SpeechRecognizer.createSpeechRecognizer(ctx)
             systemRecognizer = r
             r.setRecognitionListener(object : RecognitionListener {
-                override fun onReadyForSpeech(params: Bundle?) {}
+                override fun onReadyForSpeech(params: Bundle?) { asrErrorRetries = 0 }
                 override fun onBeginningOfSpeech() {
                     bargeIn()
                     ev("asr.speechStart", JSONObject())
@@ -482,12 +521,24 @@ class SpeechEngine(
                 override fun onEndOfSpeech() { ev("asr.speechEnd", JSONObject()) }
                 override fun onError(error: Int) {
                     if (!asrActive) return
-                    if (asrMode == "vad") main.postDelayed({ if (asrActive && asrEngine == "system") listenSystem(language) }, 350)
+                    if (asrOnce) {
+                        asrActive = false
+                        ev("asr.error", JSONObject().put("error", "Speech recognizer error: $error"))
+                        return
+                    }
+                    if (asrMode == "vad") {
+                        asrErrorRetries++
+                        if (asrErrorRetries > 2) {
+                            asrActive = false
+                            ev("asr.error", JSONObject().put("error", "Speech recognizer stopped after repeated errors"))
+                        } else main.postDelayed({ if (asrActive && asrEngine == "system") listenSystem(language) }, 350)
+                    }
                 }
                 override fun onResults(results: Bundle?) {
                     val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull() ?: ""
                     if (text.isNotBlank()) ev("asr.final", JSONObject().put("text", text))
-                    if (asrActive && asrMode == "vad") listenSystem(language)
+                    if (asrOnce) { asrActive = false; stopAsr() }
+                    else if (asrActive && asrMode == "vad") listenSystem(language)
                 }
                 override fun onPartialResults(partialResults: Bundle?) {
                     val text = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull() ?: ""
@@ -608,7 +659,10 @@ class SpeechEngine(
             val result = r.getResult(stream)
             stream.release()
             val text = result.text.trim()
-            if (text.isNotEmpty()) ev("asr.final", JSONObject().put("text", text))
+            if (text.isNotEmpty()) {
+                ev("asr.final", JSONObject().put("text", text))
+                if (asrOnce) { asrActive = false; stopAsr() }
+            }
         } catch (e: Exception) {
             Log.w(TAG, "decode", e)
         }
@@ -621,6 +675,8 @@ class SpeechEngine(
 
     fun stopAsr() {
         asrActive = false
+        asrOnce = false
+        asrErrorRetries = 0
         exec.submit { releaseAsrInternal() }
     }
 

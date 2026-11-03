@@ -49,6 +49,7 @@ export async function openLive(opts = {}) {
   root.hidden = false;
   emitLocal('back.push', 'live');
   root.innerHTML = `
+    <div id="live-typography" aria-hidden="true"><span id="live-bg-text"></span></div>
     <div id="live-stage"></div>
     <div class="live-top">
       <div class="live-title"><b>Live Talk</b>
@@ -166,6 +167,8 @@ function updateAnswerCard() {
   const card = $('#live-answer'), txt = $('#live-answer-text');
   if (!card || !txt) return;
   const { content } = splitReasoning(rawReply);
+  const bg = $('#live-bg-text');
+  if (bg) bg.textContent = content;
   if (!content.trim()) { card.hidden = true; return; }
   card.hidden = false;
   txt.textContent = content.length > 160 ? '…' + content.slice(-160) : content;
@@ -227,7 +230,8 @@ function sendKeyboardMessage() {
 async function setupVoice() {
   const hint = $('#live-hint');
   if (!hasNative()) { hint.textContent = 'Web preview — install the APK for the hands-free voice loop.'; return; }
-  await voice.configureVoice();
+  try { await voice.configureVoice(); }
+  catch (e) { hint.textContent = e.message || 'Selected voice is unavailable'; }
   if (!isReady()) { hint.textContent = 'Load a model in Model Hub to talk. Avatar actions still work.'; }
   else if (!voice.offlineVoiceReady()) { hint.textContent = 'Tip: install Whisper (Supplementary) for fully offline ears. Using the Android recognizer for now.'; }
   else { hint.textContent = mode === 'vad' ? 'Just speak — I am listening.' : 'Hold the mic button to talk.'; }
@@ -319,10 +323,9 @@ function handleUserUtterance(text) {
   bargeIn();
   store.addMessage('user', text, { live: true });
   if (!isReady()) {
-    const reply = 'Please load a model in the Model Hub first, then we can talk.';
-    store.addMessage('assistant', reply, { live: true });
-    lastAnswer = reply; rawReply = reply; updateAnswerCard();
-    speakDirect(reply);
+    setStatus('Load a model in Model Hub to talk');
+    const hint = $('#live-hint');
+    if (hint) hint.textContent = 'No model is loaded. Avatar actions still work; no reply was generated.';
     return;
   }
   setStatus('Thinking…');
@@ -483,7 +486,7 @@ export function initLive() {
     if (mode === 'vad' && !muted && $('#live-keyboard')?.hidden) startVad();
   });
   on('voice.reconfigure', async () => { if (open) await voice.configureVoice(); });
-  on('voice.engineFallback', ({ engine }) => { if (open) toast(`${engine} voice not installed — using Phonon. Get it in Model Hub → Supplementary.`); });
+  on('voice.engineFallback', ({ engine }) => { if (open) toast(`${engine} voice is unavailable. Select an installed voice in Model Hub.`); });
   on('voice.ttsError', ({ error }) => { if (open) toast('TTS: ' + error); });
   on('live.transcript', () => { spokenConsumed = 0; });
   // Anti-freeze circuit breaker: on memory pressure drop the avatar's GPU load.

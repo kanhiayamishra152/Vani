@@ -180,12 +180,12 @@ async function startMainDownload(m, q, wantMm) {
   if (!hasNative()) { toast('Downloads need the Android app'); return; }
   try {
     await invoke('downloads.start', {
-      id: `${m.id}:${q}`, url: m.url(q), fileName: m.quants[q].file, total: m.quants[q].size,
+      id: `${m.id}:${q}`, groupId: `${m.id}:${q}`, url: m.url(q), fileName: m.quants[q].file, total: m.quants[q].size,
       kind: 'llm', modelId: m.id, quant: q, name: `${m.title} (${q})`, extract: false,
     });
     if (wantMm && m.mmproj && !installed.find(x => x.modelId === m.id && x.kind === 'mmproj') && !dlFor(`${m.id}:mmproj`)) {
       await invoke('downloads.start', {
-        id: `${m.id}:mmproj`, url: m.mmprojUrl(), fileName: `${m.id}-${m.mmproj.file}`, total: m.mmproj.size,
+        id: `${m.id}:mmproj`, groupId: `${m.id}:${q}`, url: m.mmprojUrl(), fileName: `${m.id}-${m.mmproj.file}`, total: m.mmproj.size,
         kind: 'mmproj', modelId: m.id, quant: 'F16', name: `${m.title} vision projector`, extract: false,
       });
     }
@@ -294,8 +294,8 @@ function wireVoicePicker(card, m, inst) {
   card.querySelector(`[data-voice-preview="${m.id}"]`)?.addEventListener('click', async () => {
     const sid = parseInt(sel.value, 10);
     setSetting('ttsEngine', m.engine); setSetting('ttsModelId', m.id); setSetting('ttsSid', sid);
-    try { await configureVoice(); } catch {}
-    previewVoice('Hello! This is my voice. How does it sound?', sid);
+    try { await previewVoice('Hello! This is my voice. How does it sound?', sid); }
+    catch (e) { toast(e.message || 'Voice preview failed'); }
     renderHub();
   });
 }
@@ -429,7 +429,7 @@ function renderProgress(slot, dl) {
       <div class="dl-actions">
         <button data-act="pause" ${dl.state !== 'downloading' && dl.state !== 'queued' ? 'hidden' : ''}>${icon('pause')}<span>Pause</span></button>
         <button data-act="resume" ${dl.state !== 'paused' ? 'hidden' : ''}>${icon('play')}<span>Resume</span></button>
-        <button data-act="cancel" class="cancel" ${dl.state === 'extracting' || dl.state === 'finalizing' ? 'hidden' : ''}>${icon('x')}<span>Cancel</span></button>
+        <button data-act="cancel" class="cancel" ${dl.state === 'finalizing' ? 'hidden' : ''}>${icon('x')}<span>Cancel</span></button>
       </div>
       ${dl.error ? `<div class="muted small mt8">${esc(dl.error)}</div>` : ''}
     </div>`;
@@ -439,7 +439,7 @@ function renderProgress(slot, dl) {
       if (act === 'cancel') {
         emitLocal('modal.open', {
           title: 'Cancel download?', body: '<p class="muted small">Progress will be discarded. You can also pause and resume later from the exact byte offset.</p>',
-          actions: [{ label: 'Keep' }, { label: 'Cancel download', danger: true, fn: async () => { await invoke('downloads.cancel', { id: dl.id }); refreshModels(); } }],
+          actions: [{ label: 'Keep' }, { label: 'Cancel download', danger: true, fn: async () => { await invoke('downloads.cancel', { id: dl.id, groupId: dl.groupId || '' }); refreshModels(); } }],
         });
       } else { await invoke(`downloads.${act}`, { id: dl.id }); }
     } catch (e) { toast(e.message); }
@@ -463,7 +463,7 @@ function paintProgress(p) {
   node.querySelector('[data-dl-pct]').textContent = pct.toFixed(0) + '%';
   node.querySelector('[data-dl-speed]').textContent = dlSpeedLabel(p);
   const busy = p.state === 'downloading' || p.state === 'queued';
-  const finalizing = p.state === 'extracting' || p.state === 'finalizing';
+  const finalizing = p.state === 'finalizing';
   const pause = node.querySelector('[data-act="pause"]');
   const resume = node.querySelector('[data-act="resume"]');
   const cancel = node.querySelector('[data-act="cancel"]');

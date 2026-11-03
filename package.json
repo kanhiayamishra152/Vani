@@ -1,6 +1,6 @@
 {
   "name": "vani-ai",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "private": true,
   "description": "Vani AI — private, on-device AI companion for Android. Monochrome UI, local GGUF inference, 3D VRM Live Talk.",
   "type": "module",

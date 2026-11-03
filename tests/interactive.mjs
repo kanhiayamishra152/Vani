@@ -84,12 +84,12 @@ window.VaniNative = {
       case 'models.list': ok(M.models); break;
       case 'downloads.list': ok(M.downloads); break;
       case 'downloads.start': {
-        const d = { id: args.id, modelId: args.modelId, quant: args.quant, name: args.name, kind: args.kind, received: 0, total: args.total, speed: 0, state: 'downloading' };
+        const d = { id: args.id, groupId: args.groupId || '', modelId: args.modelId, quant: args.quant, name: args.name, kind: args.kind, received: 0, total: args.total, speed: 0, state: 'downloading' };
         M.downloads = M.downloads.filter(x => x.id !== d.id); M.downloads.push(d); ok(null); break;
       }
       case 'downloads.pause': { const d = M.downloads.find(x => x.id === args.id); if (d) d.state = 'paused'; ok(null); setTimeout(() => window.VaniBridge._emit('download.state', { id: args.id }), 0); break; }
       case 'downloads.resume': { const d = M.downloads.find(x => x.id === args.id); if (d) d.state = 'downloading'; ok(null); setTimeout(() => window.VaniBridge._emit('download.state', { id: args.id }), 0); break; }
-      case 'downloads.cancel': { M.downloads = M.downloads.filter(x => x.id !== args.id); ok(null); setTimeout(() => window.VaniBridge._emit('download.state', { id: args.id }), 0); break; }
+      case 'downloads.cancel': { M.downloads = M.downloads.filter(x => args.groupId ? x.groupId !== args.groupId : x.id !== args.id); ok(null); setTimeout(() => window.VaniBridge._emit('download.state', { id: args.id, groupId: args.groupId || '' }), 0); break; }
       case 'llm.load': ok({ state: 'ready', name: args.name || 'Mock model', modelPath: args.path || '/models/mock.gguf', nCtx: 4096 }); break;
       case 'llm.unload': ok({ state: 'idle' }); break;
       case 'llm.generate': {
@@ -101,7 +101,7 @@ window.VaniNative = {
           if (i < toks.length) window.VaniBridge._emit('llm.token', { genId: args.genId, text: toks[i++] });
           else {
             clearInterval(M.generationTimer); M.generationTimer = null;
-            window.VaniBridge._emit('llm.done', { genId: args.genId, tokens: toks.length, tps: 32.5, ttftMs: 42 });
+            window.VaniBridge._emit('llm.done', { genId: args.genId, tokens: toks.length, tps: 32.5, msPerToken: 30.8, ttftMs: 42, cachedTokens: 0 });
           }
         }, 25);
         break;
@@ -114,7 +114,7 @@ window.VaniNative = {
         break;
       }
       case 'tts.configure': ok(null); break;
-      case 'tts.speak': ok(null); setTimeout(() => window.VaniBridge._emit('tts.end', {}), 40); break;
+      case 'tts.speak': ok(null); window.VaniBridge._emit('tts.start', { utterId: args.utterId }); setTimeout(() => window.VaniBridge._emit('tts.end', { utterId: args.utterId, interrupted: false }), 40); break;
       case 'tts.stop': case 'asr.start': case 'asr.stop': case 'asr.feed': case 'asr.pttRelease': ok(null); break;
       case 'models.delete': { M.models = M.models.filter(m => m.id !== args.id); ok(null); setTimeout(() => window.VaniBridge._emit('models.changed', {}), 0); break; }
       case 'models.import': ok(null); break;
@@ -209,10 +209,13 @@ async function main() {
       // for the native ASR bridge, not an arbitrary avatar-load duration, before
       // injecting the transcript that drives the answer-card checks.
       await page.waitForFunction(() => window.__vaniMock.calls.includes('asr.start'), null, { timeout: 15000 });
-      // v1.3.0 floating answer -> reader, history sheet, and keyboard dock.
+      // Load the mock only for generation; the no-model boot guard was checked above.
+      await page.evaluate(() => window.__mockSetModel('Live mock model', '/models/live.gguf'));
+      // v1.4.0 floating answer -> reader, history sheet, and keyboard dock.
       await page.evaluate(() => window.VaniBridge._emit('asr.final', { text: 'Hello Live' }));
       await page.waitForFunction(() => !document.querySelector('#live-answer').hidden, null, { timeout: 5000 });
       check(await page.evaluate(() => !!document.querySelector('#live-answer-text')?.textContent), 'Live floating answer card updates in real time');
+      check(await page.evaluate(() => document.querySelector('#live-bg-text')?.textContent.includes('Hello') && Number(getComputedStyle(document.querySelector('#live-typography')).zIndex) < Number(getComputedStyle(document.querySelector('#live-stage')).zIndex)), 'Live response typography is behind the avatar');
       await page.click('#live-answer');
       check(await page.evaluate(() => !document.querySelector('#live-reader').hidden && !!document.querySelector('#live-reader-body')), 'tap-to-expand opens the scrollable answer reader');
       await page.click('#live-reader-back');
@@ -397,8 +400,52 @@ async function main() {
       await page.evaluate(() => { window.__vaniMock.holdGeneration = false; });
     });
 
+    await step('v1.4.0: message footer, context, Auto-TTS and inline dictation', async () => {
+      await page.click('#tabbar .tab[data-tab="chat"]');
+      await page.click('#btn-new-chat-top');
+      await page.evaluate(() => {
+        window.__mockSetModel('Context model', '/models/context.gguf');
+        window.__mockInstall({ id: 'tts-context', kind: 'tts', modelId: 'phonon-ultra', engine: 'kokoro', path: '/models/phonon-ultra', name: 'Ultra' });
+      });
+      await page.fill('#composer-input', 'First turn'); await page.dispatchEvent('#composer-input', 'input');
+      await page.click('#btn-send');
+      await page.waitForFunction(() => document.querySelector('#chat-list .msg.assistant .msg-stats')?.textContent.includes('ms/tok'), null, { timeout: 4000 });
+      check(await page.evaluate(() => document.querySelectorAll('#chat-list .msg-footer .msg-actions button').length === 3), 'assistant footer has Play/Copy/Regenerate controls');
+      check(await page.evaluate(() => /ms\/tok.*TTFT.*tokens/.test(document.querySelector('#chat-list .msg-stats')?.textContent || '')), 'footer exposes measured ms/tok, TTFT and token count');
+      await page.click('#chat-list .msg-audio');
+      await page.waitForFunction(() => window.__vaniMock.calls.includes('tts.speak'), null, { timeout: 4000 });
+      await page.waitForFunction(() => document.querySelector('#chat-list .msg-audio')?.getAttribute('aria-label') === 'Stop audio', null, { timeout: 4000 });
+      check(true, 'historical message Play invokes native TTS and shows Stop');
+      await page.waitForFunction(() => document.querySelector('#chat-list .msg-audio')?.getAttribute('aria-label') === 'Play response audio', null, { timeout: 4000 });
+
+      await page.fill('#composer-input', 'Second turn'); await page.dispatchEvent('#composer-input', 'input');
+      await page.click('#btn-send');
+      await page.waitForFunction(() => document.querySelectorAll('#chat-list .msg.assistant .msg-stats').length === 2 && window.__vaniMock.lastGenerate?.messages?.some(m => m.content === 'First turn') && window.__vaniMock.lastGenerate?.messages?.some(m => m.role === 'assistant' && m.content.includes('Hello')), null, { timeout: 4000 });
+      check(true, 'next native request contains prior user and assistant turns');
+
+      await page.click('#btn-auto-tts');
+      check(await page.getAttribute('#btn-auto-tts', 'aria-pressed') === 'true', 'Chat Auto-TTS toggle is enabled');
+      await page.fill('#composer-input', 'Third turn'); await page.dispatchEvent('#composer-input', 'input');
+      await page.click('#btn-send');
+      await page.waitForFunction(() => document.querySelectorAll('#chat-list .msg.assistant').length === 3 && window.__vaniMock.calls.filter(x => x === 'tts.speak').length >= 2, null, { timeout: 4000 });
+      check(true, 'Auto-TTS sends the completed response to the active native voice');
+      await page.click('#btn-auto-tts');
+
+      await page.fill('#composer-input', 'Prefix'); await page.dispatchEvent('#composer-input', 'input');
+      const asrStarts = await page.evaluate(() => window.__vaniMock.calls.filter(x => x === 'asr.start').length);
+      await page.click('#btn-mic');
+      await page.waitForFunction(n => window.__vaniMock.calls.filter(x => x === 'asr.start').length > n, asrStarts, { timeout: 4000 });
+      check(await page.evaluate(() => !document.querySelector('#composer-status').hidden && document.querySelector('#toast').hidden), 'dictation uses inline listening state without a toast');
+      await page.evaluate(() => window.VaniBridge._emit('asr.partial', { text: 'hello' }));
+      check(await page.inputValue('#composer-input') === 'Prefix hello', 'dictation preserves existing composer text during partial ASR');
+      await page.evaluate(() => window.VaniBridge._emit('asr.final', { text: 'hello world' }));
+      await page.waitForFunction(() => document.querySelector('#composer-input').value === 'Prefix hello world', null, { timeout: 4000 });
+      check(true, 'final native ASR result is inserted into the composer');
+    });
+
     await step('v1.2.0: Live singleton re-open (no black screen) + /anime keeps chat clean', async () => {
       await page.click('#tabbar .tab[data-tab="chat"]'); await sleep(120);
+      await page.fill('#composer-input', ''); await page.dispatchEvent('#composer-input', 'input');
       await page.click('#btn-live');
       await page.waitForFunction(() => !document.querySelector('#live-root').hidden, null, { timeout: 5000 });
       await sleep(300);

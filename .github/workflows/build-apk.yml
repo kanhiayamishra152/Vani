@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       publish_release:
-        description: "Publish GitHub Release (v1.3.0)"
+        description: "Publish GitHub Release (v1.4.0)"
         type: boolean
         default: true
 
@@ -19,9 +19,9 @@ permissions:
 env:
   # Release tag for this build. Immutable releases seal their assets at creation;
   # never delete one to retry (that permanently burns the tag). APK is
-  # versionName 1.3.0 / versionCode 4, signed with the committed v1 keystore so
+  # versionName 1.4.0 / versionCode 5, signed with the committed v1 keystore so
   # it installs in-place over v1.0.1 with no uninstall.
-  RELEASE_TAG: "v1.3.0"
+  RELEASE_TAG: "v1.4.0"
   NODE_VERSION: "20"
   GRADLE_VERSION: "8.7"
   ANDROID_PLATFORM: "34"
@@ -199,7 +199,7 @@ jobs:
             BT=$(dirname "$(find "$ANDROID_HOME/build-tools" -name zipalign 2>/dev/null | sort -V | tail -1)")
           fi
           RAW=$(find android/app/build/outputs/apk/release -name '*.apk' | head -1)
-          OUT=dist/vani-ai-1.3.0-release.apk
+          OUT=dist/vani-ai-1.4.0-release.apk
           echo "RAW=$RAW"; echo "BT=$BT"
           cp "$RAW" "$OUT"
           # AGP already zipaligns + signs. Verify alignment non-destructively;
@@ -224,24 +224,24 @@ jobs:
       - name: SHA-256 hashes
         run: |
           cd dist
-          sha256sum vani-ai-1.3.0-release.apk vani-ai-1.3.0-source.zip | tee SHA256SUMS.txt
+          sha256sum vani-ai-1.4.0-release.apk vani-ai-1.4.0-source.zip | tee SHA256SUMS.txt
           cd ..
           sha256sum dist-tts/phonon-ultralight-8m-int8.tar.bz2 | sed 's#dist-tts/##' | tee -a dist/SHA256SUMS.txt
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: vani-ai-1.3.0-release-apk
+          name: vani-ai-1.4.0-release-apk
           path: |
-            dist/vani-ai-1.3.0-release.apk
+            dist/vani-ai-1.4.0-release.apk
             dist/SHA256SUMS.txt
           if-no-files-found: error
 
       - name: Upload source ZIP artifact
         uses: actions/upload-artifact@v4
         with:
-          name: vani-ai-1.3.0-source
-          path: dist/vani-ai-1.3.0-source.zip
+          name: vani-ai-1.4.0-source
+          path: dist/vani-ai-1.4.0-source.zip
           if-no-files-found: error
 
       - name: Publish the Ultra-Light TTS pack release
@@ -279,7 +279,7 @@ jobs:
           # upload the freshly built dist assets.
           if gh release view "$RELEASE_TAG" --repo "$REPO" >/dev/null 2>&1; then
             gh release download "$RELEASE_TAG" --repo "$REPO" \
-              -p 'vani-ai-1.3.0-release.apk' -p 'vani-ai-1.3.0-source.zip' -p 'SHA256SUMS.txt' \
+              -p 'vani-ai-1.4.0-release.apk' -p 'vani-ai-1.4.0-source.zip' -p 'SHA256SUMS.txt' \
               -D dist --clobber || true
           fi
           bash scripts/upload-gofile.sh
@@ -304,7 +304,7 @@ jobs:
             printf '\n_Mirrors: gofile.io upload unavailable for this run._\n' >> /tmp/body.md
           fi
 
-          ASSETS=(dist/vani-ai-1.3.0-release.apk dist/vani-ai-1.3.0-source.zip dist/SHA256SUMS.txt)
+          ASSETS=(dist/vani-ai-1.4.0-release.apk dist/vani-ai-1.4.0-source.zip dist/SHA256SUMS.txt)
 
           if ! gh release view "$RELEASE_TAG" --repo "$REPO" >/dev/null 2>&1; then
             # Immutable-safe: passing files to `gh release create` makes it create
@@ -312,12 +312,12 @@ jobs:
             # before the release seals. (Create-empty-then-upload is rejected 422.)
             # NEVER delete an immutable release to retry: that burns the tag name.
             gh release create "$RELEASE_TAG" --repo "$REPO" --target "$GITHUB_SHA" \
-              --title "Vani AI v1.3.0" --notes-file /tmp/body.md --latest "${ASSETS[@]}"
+              --title "Vani AI v1.4.0" --notes-file /tmp/body.md --latest "${ASSETS[@]}"
           else
             COUNT=$(gh release view "$RELEASE_TAG" --repo "$REPO" --json assets --jq '.assets | length')
             if [ "$COUNT" -ge 3 ]; then
               # Already published with assets: only title/notes may be refreshed.
-              gh release edit "$RELEASE_TAG" --repo "$REPO" --title "Vani AI v1.3.0" --notes-file /tmp/body.md --latest
+              gh release edit "$RELEASE_TAG" --repo "$REPO" --title "Vani AI v1.4.0" --notes-file /tmp/body.md --latest
             else
               echo "ERROR: $RELEASE_TAG exists with only $COUNT assets and is immutable; cannot add assets or reuse the tag. Bump RELEASE_TAG." >&2
               exit 1

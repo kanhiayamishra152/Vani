@@ -143,6 +143,7 @@ export class AvatarStage {
       if (this.renderer.compileAsync) await this.renderer.compileAsync(this.scene, this.camera);
       else this.renderer.compile(this.scene, this.camera);
     } catch { /* first render will compile lazily */ }
+    if (this.disposed) return;
     this.opts.onProgress?.('ready', 1);
 
     this.state = 'idle';
@@ -344,6 +345,7 @@ export class AvatarStage {
   }
 
   walkIn() {
+    if (this.disposed || !this.root) return;
     const side = Math.random() < 0.5 ? -1 : 1;
     this.walk = { t: 0, dur: 2.6, side };
     this.state = 'walkin';
@@ -351,7 +353,7 @@ export class AvatarStage {
   }
 
   performAction(name) {
-    if (!this.vrm || !sampleAction(name, 0)) return false;
+    if (this.disposed || !this.vrm || !sampleAction(name, 0)) return false;
     this.action = { name, t: 0 };
     this.state = 'action';
     return true;
@@ -367,6 +369,7 @@ export class AvatarStage {
   }
 
   startLoop() {
+    if (this.disposed || !this.renderer) return;
     cancelAnimationFrame(this.raf);
     this.last = performance.now();
     const loop = () => {

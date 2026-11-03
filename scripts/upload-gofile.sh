@@ -6,7 +6,7 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p dist
 : > dist/gofile-links.txt
-for f in dist/vani-ai-1.3.0-release.apk dist/vani-ai-1.3.0-source.zip dist-tts/phonon-ultralight-8m-int8.tar.bz2; do
+for f in dist/vani-ai-1.4.0-release.apk dist/vani-ai-1.4.0-source.zip dist-tts/phonon-ultralight-8m-int8.tar.bz2; do
   [[ -f "$f" ]] || { echo "[gofile] skip (missing): $f"; continue; }
   echo "[gofile] uploading $f ..."
   SERVER=$(curl -s -m 20 "https://api.gofile.io/servers" | python3 -c "import json,sys; d=json.load(sys.stdin); s=d['data']['servers']; print(s[0]['name'] if isinstance(s,list) else list(s)[0])" 2>/dev/null) || SERVER=""

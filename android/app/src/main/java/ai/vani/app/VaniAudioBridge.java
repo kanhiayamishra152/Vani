@@ -62,7 +62,10 @@ public final class VaniAudioBridge {
                 int n;
                 try { n = r.read(buf, 0, buf.length); } catch (Exception e) { break; }
                 if (n < 0) { Log.w(TAG, "AudioRecord read error " + n); break; }
-                if (n == 0) continue;
+                if (n == 0) {
+                    try { Thread.sleep(8); } catch (InterruptedException e) { break; }
+                    continue;
+                }
                 for (int i = 0; i < n; i++) f[i] = buf[i] / 32768.0f;
                 try { sink.accept(f, n); } catch (Throwable ignored) {}
             }

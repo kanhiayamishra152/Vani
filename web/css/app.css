@@ -598,3 +598,25 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 22p
 }
 .field select:focus { border-color: #52525B; outline: none; }
 .field input[type="text"], .field input[type="url"] { width: 100%; }
+
+
+/* v1.4.0 message controls and inline composer states */
+.msg-footer { display: flex; align-items: center; flex-wrap: wrap; gap: 2px 8px; margin-top: 5px; }
+.msg-footer .msg-actions { margin-top: 0; }
+.msg-footer .msg-stats { margin-left: 0; flex: 1 1 180px; min-width: 0; white-space: normal; line-height: 1.35; }
+.msg-footer .msg-regenerate { color: var(--text-2); }
+.composer-status { padding: 0 8px 5px; color: var(--text-2); font-size: 12px; line-height: 1.35; }
+.composer-status.listening { color: #fff; }
+.composer-status.error { color: var(--danger); }
+.icon-btn.auto-tts { width: 34px; height: 34px; color: var(--text-2); }
+.icon-btn.auto-tts.on { color: #fff; background: var(--surface-3); }
+.icon-btn.auto-tts svg { width: 18px; height: 18px; }
+@media (max-width: 390px) {
+  .think-toggle { padding: 0 7px; }
+  .icon-btn.auto-tts { width: 30px; }
+}
+
+/* Live response typography is deliberately behind the VRM stage and controls. */
+#live-typography { position: absolute; inset: 0; z-index: 0; overflow: hidden; pointer-events: none; display: flex; align-items: center; justify-content: center; }
+#live-bg-text { max-width: 94vw; max-height: 70vh; overflow: hidden; color: #fff; opacity: .065; font-size: clamp(42px, 13vw, 142px); font-weight: 800; line-height: .98; letter-spacing: -.045em; text-align: center; white-space: pre-wrap; word-break: break-word; }
+#live-stage { z-index: 1; }

@@ -29,6 +29,7 @@ import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.Locale;
+import java.util.ArrayList;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -50,6 +51,8 @@ public class DownloadService extends Service {
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final ConcurrentHashMap<String, String> liveState = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, JSONObject> liveMeta = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, HttpURLConnection> liveConnections = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Thread> liveWorkers = new ConcurrentHashMap<>();
     private PowerManager.WakeLock wakeLock;
     private volatile boolean pumping = false;
 
@@ -61,9 +64,14 @@ public class DownloadService extends Service {
     }
 
     public static void command(Context ctx, String action, String id) {
+        command(ctx, action, id, "");
+    }
+
+    public static void command(Context ctx, String action, String id, String groupId) {
         Intent i = new Intent(ctx, DownloadService.class);
         i.setAction(action);
         i.putExtra("id", id);
+        i.putExtra("groupId", groupId == null ? "" : groupId);
         ctx.startForegroundService(i);
     }
 
@@ -131,15 +139,7 @@ public class DownloadService extends Service {
                 emitState(id);
                 pump();
             } else if (ACTION_CANCEL.equals(action)) {
-                String id = intent.getStringExtra("id");
-                liveState.put(id, "cancelled");
-                JSONObject e = liveMeta.get(id);
-                if (e != null) SafeFilename.safeChild(Models.modelsDir(this), e.optString("fileName") + ".part").delete();
-                liveMeta.remove(id);
-                Downloads.remove(this, id);
-                getSystemService(NotificationManager.class).cancel(notifId(id));
-                emit("download.state", new JSONObject().put("id", id).put("state", "cancelled").toString());
-                stopIfIdle();
+                cancel(intent.getStringExtra("id"), intent.getStringExtra("groupId"));
             }
         } catch (Exception e) {
             Log.e(TAG, "command failed", e);
@@ -157,6 +157,7 @@ public class DownloadService extends Service {
             try {
                 acquireWake();
                 while (true) {
+                    Thread.interrupted();
                     JSONObject next = null;
                     for (JSONObject e : liveMeta.values()) {
                         if ("queued".equals(liveState.get(e.optString("id")))) { next = e; break; }
@@ -184,27 +185,33 @@ public class DownloadService extends Service {
 
     private void downloadWithRetry(JSONObject e) {
         String id = e.optString("id");
+        liveWorkers.put(id, Thread.currentThread());
         int retries = 0;
-        while (true) {
-            String st = liveState.get(id);
-            if (!"queued".equals(st) && !"downloading".equals(st)) return;
-            try {
-                download(e);
-                return;
-            } catch (Exception ex) {
-                Log.w(TAG, "download error: " + ex.getMessage());
-                String cur = liveState.get(id);
-                if ("paused".equals(cur) || "cancelled".equals(cur)) return;
-                retries++;
-                if (retries > 3) {
-                    liveState.put(id, "paused");
-                    patchPersist(id, "state", "paused");
-                    patchPersist(id, "error", ex.getMessage() + " — tap Resume to continue from the exact byte offset");
-                    emitState(id);
+        try {
+            while (true) {
+                String st = liveState.get(id);
+                if (!"queued".equals(st) && !"downloading".equals(st)) return;
+                try {
+                    download(e);
                     return;
+                } catch (Exception ex) {
+                    Log.w(TAG, "download error: " + ex.getMessage());
+                    String cur = liveState.get(id);
+                    if ("paused".equals(cur) || "cancelled".equals(cur)) return;
+                    retries++;
+                    if (retries > 3) {
+                        liveState.put(id, "paused");
+                        patchPersist(id, "state", "paused");
+                        patchPersist(id, "error", ex.getMessage() + " — tap Resume to continue from the exact byte offset");
+                        emitState(id);
+                        return;
+                    }
+                    try { Thread.sleep(2000L * retries); }
+                    catch (InterruptedException ignored) { Thread.currentThread().interrupt(); return; }
                 }
-                try { Thread.sleep(2000L * retries); } catch (InterruptedException ignored) { return; }
             }
+        } finally {
+            liveWorkers.remove(id);
         }
     }
 
@@ -236,7 +243,7 @@ public class DownloadService extends Service {
             con.setConnectTimeout(30000);
             con.setReadTimeout(30000);
             con.setInstanceFollowRedirects(false);
-            con.setRequestProperty("User-Agent", "VaniAI/1.3.0 (Android)");
+            con.setRequestProperty("User-Agent", "VaniAI/1.4.0 (Android)");
             if (offset > 0) con.setRequestProperty("Range", "bytes=" + offset + "-");
             code = con.getResponseCode();
             if (code == 301 || code == 302 || code == 303 || code == 307 || code == 308) {
@@ -253,6 +260,8 @@ public class DownloadService extends Service {
         boolean append = code == 206;
         if (code == 200 && offset > 0) { offset = 0; append = false; }
         if (code != 200 && code != 206) throw new IOException("HTTP " + code);
+        if ("cancelled".equals(liveState.get(id))) { con.disconnect(); throw new CancelSignal(); }
+        liveConnections.put(id, con);
 
         liveState.put(id, "downloading");
         patchPersist(id, "state", "downloading");
@@ -289,7 +298,9 @@ public class DownloadService extends Service {
             }
         } finally {
             con.disconnect();
+            liveConnections.remove(id);
         }
+        if ("cancelled".equals(liveState.get(id))) { part.delete(); throw new CancelSignal(); }
         if (dest.exists()) dest.delete();
         if (!part.renameTo(dest)) throw new IOException("rename failed");
         return dest.length();
@@ -362,7 +373,8 @@ public class DownloadService extends Service {
             return;
         }
 
-        // Register + finalize.
+        // Register + finalize only if the user did not cancel the group.
+        if ("cancelled".equals(liveState.get(id))) { deleteParts(e); return; }
         liveState.put(id, "finalizing");
         emitProgress(id, e.optLong("total", 0), e.optLong("total", 0), 0, "finalizing");
         JSONObject reg = new JSONObject();
@@ -381,6 +393,7 @@ public class DownloadService extends Service {
     }
 
     private void finishDone(JSONObject e, String id) throws Exception {
+        if ("cancelled".equals(liveState.get(id))) return;
         liveState.put(id, "done");
         liveMeta.remove(id);
         Downloads.remove(this, id);
@@ -410,7 +423,7 @@ public class DownloadService extends Service {
     }
 
     /** Extract .tar.bz2 safely with live progress; returns the top-level model dir. */
-    private File extractTarBz2(File archive, File destRoot, String id, JSONObject e) throws IOException {
+    private File extractTarBz2(File archive, File destRoot, String id, JSONObject e) throws Exception {
         String topDir = null;
         long lastEmit = 0;
         int entries = 0;
@@ -420,7 +433,7 @@ public class DownloadService extends Service {
             TarArchiveEntry entry;
             byte[] buf = new byte[65536];
             while ((entry = tar.getNextTarEntry()) != null) {
-                if ("cancelled".equals(liveState.get(id))) throw new IOException("cancelled");
+                if ("cancelled".equals(liveState.get(id))) throw new CancelSignal();
                 String name = entry.getName();
                 if (name.contains("..")) continue;
                 if (topDir == null) {
@@ -472,10 +485,13 @@ public class DownloadService extends Service {
     /* ---------------- notifications ---------------- */
     private int notifId(String id) { return Math.abs(id.hashCode() % 100000) + 10; }
 
-    private PendingIntent actionIntent(String action, String id) {
+    private PendingIntent actionIntent(String action, String id) { return actionIntent(action, id, ""); }
+
+    private PendingIntent actionIntent(String action, String id, String groupId) {
         Intent i = new Intent(this, DownloadService.class);
         i.setAction(action);
         i.putExtra("id", id);
+        i.putExtra("groupId", groupId == null ? "" : groupId);
         int flags = PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE;
         return PendingIntent.getService(this, (action + id).hashCode(), i, flags);
     }
@@ -503,7 +519,7 @@ public class DownloadService extends Service {
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)
                 .addAction(android.R.drawable.ic_media_pause, "Pause", actionIntent(ACTION_PAUSE, id))
-                .addAction(android.R.drawable.ic_delete, "Cancel", actionIntent(ACTION_CANCEL, id))
+                .addAction(android.R.drawable.ic_delete, "Cancel", actionIntent(ACTION_CANCEL, id, e.optString("groupId")))
                 .build();
         getSystemService(NotificationManager.class).notify(notifId(id), n);
     }
@@ -517,6 +533,58 @@ public class DownloadService extends Service {
                 .setAutoCancel(true)
                 .build();
         getSystemService(NotificationManager.class).notify(notifId(id), n);
+    }
+
+    /** Cancel every segment of a model/projector group without touching other jobs. */
+    private void cancel(String id, String groupId) throws Exception {
+        ArrayList<JSONObject> affected = new ArrayList<>();
+        if (groupId != null && !groupId.isEmpty()) {
+            for (JSONObject e : liveMeta.values()) {
+                if (groupId.equals(e.optString("groupId"))) affected.add(e);
+            }
+        }
+        if (affected.isEmpty() && id != null) {
+            JSONObject e = liveMeta.get(id);
+            if (e != null) affected.add(e);
+        }
+        for (JSONObject e : affected) {
+            String partId = e.optString("id");
+            liveState.put(partId, "cancelled");
+            deleteParts(e);
+        }
+        for (JSONObject e : affected) {
+            String partId = e.optString("id");
+            HttpURLConnection con = liveConnections.remove(partId);
+            if (con != null) con.disconnect();
+            Thread thread = liveWorkers.get(partId);
+            if (thread != null) thread.interrupt();
+        }
+        for (JSONObject e : affected) {
+            String partId = e.optString("id");
+            liveMeta.remove(partId);
+            Downloads.remove(this, partId);
+            getSystemService(NotificationManager.class).cancel(notifId(partId));
+            emit("download.state", new JSONObject().put("id", partId).put("groupId", e.optString("groupId")).put("state", "cancelled").toString());
+        }
+        stopIfIdle();
+    }
+
+    private void deleteParts(JSONObject e) {
+        try {
+            File root = Models.modelsDir(this);
+            String fileName = e.optString("fileName");
+            if (!fileName.isEmpty()) SafeFilename.safeChild(root, fileName + ".part").delete();
+            JSONArray files = e.optJSONArray("files");
+            if (files != null) {
+                File dir = SafeFilename.safeChild(root, sanitize(e.optString("modelId", e.optString("id"))));
+                for (int i = 0; i < files.length(); i++) {
+                    JSONObject f = files.optJSONObject(i);
+                    if (f == null) continue;
+                    File dest = SafeFilename.safeChild(dir, f.optString("name"));
+                    new File(dest.getParentFile(), dest.getName() + ".part").delete();
+                }
+            }
+        } catch (Exception ignored) {}
     }
 
     /* ---------------- state helpers ---------------- */
@@ -556,7 +624,7 @@ public class DownloadService extends Service {
 
     private void stopIfIdle() {
         for (String st : liveState.values()) {
-            if ("queued".equals(st) || "downloading".equals(st) || "extracting".equals(st)) return;
+            if ("queued".equals(st) || "downloading".equals(st) || "extracting".equals(st) || "finalizing".equals(st)) return;
         }
         stopForeground(STOP_FOREGROUND_REMOVE);
         stopSelf();
@@ -567,6 +635,8 @@ public class DownloadService extends Service {
 
     @Override
     public void onDestroy() {
+        for (HttpURLConnection con : liveConnections.values()) con.disconnect();
+        liveConnections.clear();
         releaseWake();
         worker.shutdownNow();
         super.onDestroy();

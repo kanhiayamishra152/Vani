@@ -33,6 +33,7 @@
         <div id="chat-empty" hidden></div>
       </div>
       <div id="composer">
+        <div id="composer-status" class="composer-status" role="status" hidden></div>
         <div id="attach-preview" hidden></div>
         <div class="composer-bar">
           <button id="btn-attach" class="icon-btn" aria-label="Attach image"></button>
@@ -40,6 +41,7 @@
             <textarea id="composer-input" rows="1" placeholder="Message Vani AI" autocomplete="off"></textarea>
           </div>
           <button id="btn-think" class="think-toggle" aria-label="Toggle model thinking" aria-pressed="true" title="Thinking: ON"></button>
+          <button id="btn-auto-tts" class="icon-btn auto-tts" aria-label="Auto-speak replies: off" aria-pressed="false" title="Auto-speak replies: OFF"></button>
           <button id="btn-mic" class="icon-btn" aria-label="Dictate"></button>
           <button id="btn-stop" class="icon-btn stop" aria-label="Stop generating" hidden></button>
           <button id="btn-send" class="icon-btn send" aria-label="Send" hidden></button>

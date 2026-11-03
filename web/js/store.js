@@ -18,6 +18,7 @@ export const DEFAULT_SETTINGS = {
   vadSensitivity: 0.5,
   batterySaver: false, fpsTarget: 60,
   ttsEngine: 'kokoro', ttsModelId: 'phonon-ultra', ttsSpeed: 1.0, ttsSid: 0,
+  autoTts: false,
   asrEngine: 'auto', asrModelId: '', asrLanguage: 'en',
 };
 export const settings = { ...DEFAULT_SETTINGS, ...read(K.settings, {}) };
@@ -94,6 +95,18 @@ export function addMessage(role, content, extra = {}, threadId = activeThreadId)
   if (role === 'user' && t.messages.filter(x => x.role === 'user').length === 1 && t.title === 'New chat') t.title = autoTitle(content);
   persistThreads();
   return m;
+}
+
+/** Remove a message and its later branch, preserving all earlier turns. */
+export function truncateFrom(msgId, threadId = activeThreadId) {
+  const t = getThread(threadId);
+  if (!t) return false;
+  const i = t.messages.findIndex(m => m.id === msgId);
+  if (i < 0) return false;
+  t.messages.splice(i);
+  t.updatedAt = Date.now();
+  persistThreads();
+  return true;
 }
 
 export function updateMessage(msgId, patch, threadId = activeThreadId) {

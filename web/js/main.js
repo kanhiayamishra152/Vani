@@ -157,11 +157,7 @@ function boot() {
   refreshStatus();
   autoRestore();
   nav('chat');
-  // v1.3.0 anti-freeze heartbeat: the native CrashGuard watchdog monitors this
-  // ping every 1000 ms; if the UI/GPU thread stalls > 3.5 s it releases native
-  // buffers and (as a last resort) cleanly exits before the phone OS locks up.
-  if (hasNative()) setInterval(() => invoke('system.heartbeat').catch(() => {}), 1000);
-  console.log('%cVani AI v1.3.0', 'font-weight:bold', hasNative() ? '(Android bridge active)' : '(browser preview)');
+  console.log('%cVani AI v1.4.0', 'font-weight:bold', hasNative() ? '(Android bridge active)' : '(browser preview)');
 }
 
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);

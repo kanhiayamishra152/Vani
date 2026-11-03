@@ -235,9 +235,11 @@ JNIEXPORT void JNICALL Java_ai_vani_app_LlmEngine_nativeGenerate(
                 env->GetMethodID(cbCls, "onToken", "(Ljava/lang/String;)V"),
                 env->GetMethodID(cbCls, "onDone", "(Ljava/lang/String;)V"),
                 env->GetMethodID(cbCls, "onError", "(Ljava/lang/String;)V")};
+    env->DeleteLocalRef(cbCls);
     if (!v || !v->model || !v->ctx) { cb.error("No model loaded"); return; }
 
     std::lock_guard<std::mutex> lock(v->mtx);
+    const auto requestStart = std::chrono::steady_clock::now();
     v->stop = false;
 
     try {
@@ -276,11 +278,16 @@ JNIEXPORT void JNICALL Java_ai_vani_app_LlmEngine_nativeGenerate(
         sp.penalty_repeat = repeat;
         sp.seed = (uint32_t) std::chrono::steady_clock::now().time_since_epoch().count();
         common_sampler * smpl = common_sampler_init(v->model, sp);
+        if (!smpl) { cb.error("Failed to initialize the sampler"); return; }
 
         llama_memory_t mem = llama_get_memory(v->ctx);
         const int n_ctx = (int) llama_n_ctx(v->ctx);
         llama_pos n_past = 0;
         size_t n_prompt = 0;
+        size_t cachedTokens = 0;
+        size_t evaluatedPromptTokens = 0;
+        size_t promptTokenCount = 0;
+        bool decodeFailed = false;
         bool hasImages = images.size() > 0 && v->mctx;
         std::vector<llama_token> prompt_tokens;
 
@@ -325,9 +332,12 @@ JNIEXPORT void JNICALL Java_ai_vani_app_LlmEngine_nativeGenerate(
             // ---- text path with prefix KV-cache reuse ----
             prompt_tokens = tokenize(v->vocab, prompt, false);
             if (prompt_tokens.empty()) { common_sampler_free(smpl); cb.error("Empty prompt"); return; }
+            promptTokenCount = prompt_tokens.size();
             size_t keep = 0;
             while (keep < v->prev_tokens.size() && keep < prompt_tokens.size()
                    && v->prev_tokens[keep] == prompt_tokens[keep]) keep++;
+            cachedTokens = keep;
+            evaluatedPromptTokens = keep;
             llama_memory_seq_rm(mem, 0, (llama_pos) keep, -1);
             n_past = (llama_pos) keep;
             for (size_t i = keep; i < prompt_tokens.size() && !v->stop; ) {
@@ -340,6 +350,7 @@ JNIEXPORT void JNICALL Java_ai_vani_app_LlmEngine_nativeGenerate(
                 }
                 i += n;
                 n_past += n;
+                evaluatedPromptTokens += n;
             }
             n_prompt = prompt_tokens.size();
         }
@@ -350,6 +361,9 @@ JNIEXPORT void JNICALL Java_ai_vani_app_LlmEngine_nativeGenerate(
         // evaluateJavascript / re-parse the DOM once per token. TTFT is measured.
         auto t0 = std::chrono::steady_clock::now();
         auto promptDone = std::chrono::steady_clock::now();
+        const double promptMs = std::chrono::duration<double, std::milli>(promptDone - requestStart).count();
+        // Never ask the sampler to write beyond the actual context window.
+        maxTokens = std::max(0, std::min(maxTokens, n_ctx - (int) n_past));
         std::string full, pending, batchBuf;
         size_t emitted = 0;
         int n_gen = 0, sinceFlush = 0;
@@ -375,7 +389,7 @@ JNIEXPORT void JNICALL Java_ai_vani_app_LlmEngine_nativeGenerate(
             common_sampler_accept(smpl, tok, true);
             if (llama_vocab_is_eog(v->vocab, tok)) break;
 
-            if (ttftMs < 0) ttftMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - promptDone).count();
+            if (ttftMs < 0) ttftMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - requestStart).count();
             full += token_piece(v->vocab, tok);
             bool hitStop = false;
             for (const auto & s : stopStrings) {
@@ -392,21 +406,34 @@ JNIEXPORT void JNICALL Java_ai_vani_app_LlmEngine_nativeGenerate(
             n_gen++;
             prompt_tokens.push_back(tok);
             llama_batch batch = llama_batch_get_one(&tok, 1);
-            if (llama_decode(v->ctx, batch) != 0) break;
+            if (llama_decode(v->ctx, batch) != 0) { decodeFailed = true; break; }
             n_past++;
         }
         if (emitted < full.size()) batchBuf += full.substr(emitted);
         flush(true); // final partial batch
 
-        if (!hasImages) v->prev_tokens = std::move(prompt_tokens);
+        if (decodeFailed) {
+            common_sampler_free(smpl);
+            cb.error("Token evaluation failed; partial response discarded");
+            return;
+        }
+        if (!hasImages) {
+            // A Stop during prompt evaluation must not cache tokens that were
+            // never decoded; the next turn can reuse only the real KV prefix.
+            if (evaluatedPromptTokens < promptTokenCount) prompt_tokens.resize(evaluatedPromptTokens);
+            v->prev_tokens = std::move(prompt_tokens);
+        }
         common_sampler_free(smpl);
 
         double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         common_json stats = common_json::object();
         stats["tokens"] = n_gen;
         stats["tps"] = secs > 0 ? n_gen / secs : 0.0;
-        stats["ttftMs"] = ttftMs < 0 ? 0.0 : ttftMs;
+        stats["msPerToken"] = n_gen > 0 ? secs * 1000.0 / n_gen : -1.0;
+        stats["ttftMs"] = ttftMs;
+        stats["promptMs"] = promptMs;
         stats["promptTokens"] = (int) n_prompt;
+        stats["cachedTokens"] = (int) cachedTokens;
         stats["stopped"] = stopped;
         cb.done(stats.dump());
     } catch (const std::exception & e) {

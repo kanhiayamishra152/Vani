@@ -58,7 +58,7 @@ public final class Bridge {
                 break;
             case "downloads.pause": DownloadService.command(act, DownloadService.ACTION_PAUSE, a.getString("id")); ok(id, null); break;
             case "downloads.resume": DownloadService.command(act, DownloadService.ACTION_RESUME, a.getString("id")); ok(id, null); break;
-            case "downloads.cancel": DownloadService.command(act, DownloadService.ACTION_CANCEL, a.getString("id")); ok(id, null); break;
+            case "downloads.cancel": DownloadService.command(act, DownloadService.ACTION_CANCEL, a.getString("id"), a.optString("groupId", "")); ok(id, null); break;
 
             case "models.list": okArr(id, Models.scan(act)); break;
             case "models.delete":

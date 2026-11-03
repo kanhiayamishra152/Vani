@@ -71,10 +71,9 @@ public class MainActivity extends Activity {
         llm = new LlmEngine(this);
         speech = new SpeechEngine(this, (event, payload) -> { emit(event, payload); return kotlin.Unit.INSTANCE; });
         bridge = new Bridge(this);
-        // v1.3.0 anti-freeze watchdog + fatal-crash native cleanup.
+        // Keep fatal-crash cleanup, but do not run a perpetual watchdog/heartbeat.
         crashGuard = new CrashGuard(this);
         crashGuard.installUncaughtHandler();
-        crashGuard.start();
 
         web = new WebView(this);
         setContentView(web);
@@ -310,6 +309,7 @@ public class MainActivity extends Activity {
     protected void onPause() {
         super.onPause();
         if (web != null) web.onPause();
+        try { if (speech != null) { speech.stopTts(); speech.stopAsr(); } } catch (Exception ignored) {}
         emit("app.background.native", "{}");
     }
 
@@ -321,11 +321,19 @@ public class MainActivity extends Activity {
     }
 
     @Override
+    public void onTrimMemory(int level) {
+        super.onTrimMemory(level);
+        String severity = level >= TRIM_MEMORY_COMPLETE ? "critical" :
+                (level >= TRIM_MEMORY_RUNNING_CRITICAL ? "high" : "moderate");
+        emit("memory.pressure", "{"level":"" + severity + ""}");
+    }
+
+    @Override
     protected void onDestroy() {
         instance = null;
         try { if (crashGuard != null) crashGuard.stop(); } catch (Exception ignored) {}
-        try { speech.release(); } catch (Exception ignored) {}
-        try { llm.shutdown(); } catch (Exception ignored) {}
+        try { if (speech != null) speech.release(); } catch (Exception ignored) {}
+        try { if (llm != null) llm.shutdown(); } catch (Exception ignored) {}
         try { if (web != null) web.destroy(); } catch (Exception ignored) {}
         super.onDestroy();
     }

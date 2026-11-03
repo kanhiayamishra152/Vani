@@ -11,7 +11,6 @@ import { configureVoice, previewVoice } from './voice.js';
 
 let device = null;
 let gpuName = null;
-let pollTimer = null;
 let buildInfo = null;
 
 const CTX_VALUES = [512, 1024, 2048, 4096, 6144, 8192, 12288, 16384, 32768];
@@ -36,7 +35,7 @@ async function measure() {
 export function autoTune(apply = true) {
   const freeGB = (device?.ramAvailBytes || 4 * 1073741824) / 1073741824;
   const cores = device?.cores || 8;
-  const ctx = freeGB >= 6 ? 8192 : freeGB >= 4.5 ? 6144 : freeGB >= 3.5 ? 4096 : freeGB >= 2.5 ? 2048 : 1024;
+  const ctx = Math.min(4096, freeGB >= 6 ? 8192 : freeGB >= 4.5 ? 6144 : freeGB >= 3.5 ? 4096 : freeGB >= 2.5 ? 2048 : 1024);
   const threads = cores >= 8 ? 4 : Math.max(1, Math.min(4, cores - 1));
   if (apply) {
     if (settings.autoCtx) setSetting('nCtx', ctx);
@@ -206,13 +205,15 @@ export async function renderSettings() {
           onPick: v => { setSetting('ttsSid', v); configureVoice(); toast('Voice: ' + (voiceList.find(x => x.id === v)?.label || v)); renderSettings(); },
         });
       }),
-      rowButton('Preview voice', 'Hear a sample of the selected voice.', 'Preview', 'volume', () => {
-        Promise.resolve(configureVoice()).then(() => previewVoice('Hello! This is my voice. How does it sound?', settings.ttsSid));
+      rowButton('Preview voice', 'Hear a sample of the selected voice.', 'Preview', 'volume', async () => {
+        try { await previewVoice('Hello! This is my voice. How does it sound?', settings.ttsSid); }
+        catch (e) { toast(e.message || 'Voice preview failed'); }
       }),
     );
   }
   const asrLabels = { auto: 'Auto', whisper: 'Whisper (offline)', moonshine: 'Moonshine (offline)', sensevoice: 'SenseVoice (offline)', zipformer: 'Zipformer (offline)', system: 'System recognizer' };
   voice.append(
+    rowToggle('Auto-speak chat replies', 'Speak completed clauses as each chat response streams. Off by default.', 'autoTts'),
     rowSlider('Speech rate', 'Speaking speed for the Live Talk voice.', 'ttsSpeed', 0.6, 1.6, 0.05, v => v.toFixed(2) + '×'),
     rowPicker('Speech recognition', 'Offline ASR runs on-device; System uses the Android recognizer.', asrLabels[settings.asrEngine] || 'Auto', () => {
       emitLocal('sheet.open', {
@@ -253,7 +254,7 @@ export async function renderSettings() {
 
   const about = $('#sec-about');
   about.innerHTML = `
-    <div class="settings-row"><div class="row-text"><span class="row-title">Vani AI</span><span class="row-desc">Version 1.3.0 (4) · ai.vani.app · build ${esc(buildInfo?.commit || 'dev')}</span></div><img src="assets/logo-mark.svg" style="width:30px;height:30px" alt=""></div>
+    <div class="settings-row"><div class="row-text"><span class="row-title">Vani AI</span><span class="row-desc">Version 1.4.0 (5) · ai.vani.app · build ${esc(buildInfo?.commit || 'dev')}</span></div><img src="assets/logo-mark.svg" style="width:30px;height:30px" alt=""></div>
     <div class="settings-row"><div class="row-text"><span class="row-title">Private by design</span><span class="row-desc">Inference, speech and chat history stay on this device. Models download only from the sources you choose.</span></div></div>
     <div class="settings-row"><div class="row-text"><span class="row-title">Open source</span><span class="row-desc">llama.cpp · sherpa-onnx · three.js · three-vrm · KaTeX</span></div><button class="btn-secondary" id="about-repo" style="padding:8px 14px;font-size:13px">${icon('link')}<span>GitHub</span></button></div>`;
   about.querySelector('#about-repo').addEventListener('click', () => {
@@ -266,18 +267,7 @@ export async function renderSettings() {
 export function initSettings() {
   fetch('build-info.json').then(r => r.json()).then(j => { buildInfo = j; }).catch(() => {});
   on('tab.changed', async t => {
-    clearInterval(pollTimer);
-    if (t === 'settings') {
-      await renderSettings();
-      pollTimer = setInterval(async () => {
-        if (!hasNative()) return;
-        try {
-          device = await invoke('device.info');
-          const n = $('#tel-free');
-          if (n) n.textContent = fmtBytes(device.ramAvailBytes);
-        } catch {}
-      }, 5000);
-    }
+    if (t === 'settings') await renderSettings();
   });
   on('settings.changed', p => {
     // Re-apply voice config live if Live Talk is running.
