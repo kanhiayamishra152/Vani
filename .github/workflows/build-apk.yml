@@ -197,62 +197,33 @@ jobs:
           path: dist/vani-ai-1.0.0-source.zip
           if-no-files-found: error
 
-      - name: Upload to gofile.io
+      - name: Mirror published assets to gofile.io
         if: github.event_name != 'pull_request'
         continue-on-error: true
-        run: bash scripts/upload-gofile.sh dist/vani-ai-1.0.0-release.apk dist/vani-ai-1.0.0-source.zip
-
-      - name: Clear existing release assets (idempotent re-publish)
-        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_release)
-        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         run: |
-          ID=$(gh api "repos/$REPO/releases/tags/v1.0.0" --jq '.id' 2>/dev/null) || ID=""
-          if [ -n "$ID" ]; then
-            for AID in $(gh api "repos/$REPO/releases/$ID/assets" --jq '.[].id'); do
-              gh api -X DELETE "repos/$REPO/releases/assets/$AID" >/dev/null 2>&1 && echo "removed old asset $AID" || true
-            done
-          else
-            echo "no existing v1.0.0 release"
+          # If v1.0.0 already exists (it may be immutable), mirror ITS exact
+          # assets so the gofile links + hashes match the published release.
+          if gh release view v1.0.0 --repo "$REPO" >/dev/null 2>&1; then
+            gh release download v1.0.0 --repo "$REPO" \
+              -p 'vani-ai-1.0.0-release.apk' -p 'vani-ai-1.0.0-source.zip' -p 'SHA256SUMS.txt' \
+              -D dist --clobber || true
           fi
+          bash scripts/upload-gofile.sh
 
-      - name: Publish GitHub Release v1.0.0
+      - name: Publish / refresh Release v1.0.0 (immutability-aware)
         if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_release)
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v1.0.0
-          name: Vani AI v1.0.0
-          make_latest: "true"
-          generate_release_notes: false
-          overwrite_files: true
-          files: |
-            dist/vani-ai-1.0.0-release.apk
-            dist/vani-ai-1.0.0-source.zip
-            dist/SHA256SUMS.txt
-          body: |
-            ## Vani AI v1.0.0
-
-            Standalone on-device AI companion for Android (arm64-v8a, minSdk 26).
-
-            **Install:** download `vani-ai-1.0.0-release.apk`, enable "Install unknown apps", and sideload.
-
-            - Chat with local GGUF models (llama.cpp), vision via mmproj, offline KaTeX math + code cards
-            - Live Talk with the OC-Lily VRM avatar, hands-free VAD + instant barge-in, neural TTS
-            - Model Hub with resumable native downloads (HTTP Range) and notifications
-            - Pure monochrome design, zero cloud dependencies
-
-      - name: Append mirrors + hashes to Release
-        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_release)
-        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
+        shell: bash
         run: |
-          ID=$(gh api "repos/$REPO/releases/tags/v1.0.0" --jq '.id')
-          gh api "repos/$REPO/releases/$ID" --jq '.body' > /tmp/body.md
-          printf '\n\n### SHA-256\n```\n' >> /tmp/body.md
+          set -uo pipefail
+          # Body: intro + SHA-256 (matches dist assets) + gofile mirrors.
+          cat scripts/release-intro.md > /tmp/body.md
+          printf '\n### SHA-256\n```\n' >> /tmp/body.md
           cat dist/SHA256SUMS.txt >> /tmp/body.md
           printf '```\n' >> /tmp/body.md
           if [ -s dist/gofile-links.txt ]; then
@@ -261,4 +232,21 @@ jobs:
           else
             printf '\n_Mirrors: gofile.io upload unavailable for this run._\n' >> /tmp/body.md
           fi
-          gh api -X PATCH "repos/$REPO/releases/$ID" -F body=@/tmp/body.md >/dev/null && echo "release body updated with hashes + mirrors"
+          if ! gh release view v1.0.0 --repo "$REPO" >/dev/null 2>&1; then
+            # Fresh release: create + upload assets.
+            gh release create v1.0.0 --repo "$REPO" --target "$GITHUB_SHA" \
+              --title "Vani AI v1.0.0" --notes-file /tmp/body.md --latest
+            gh release upload v1.0.0 --repo "$REPO" \
+              dist/vani-ai-1.0.0-release.apk dist/vani-ai-1.0.0-source.zip dist/SHA256SUMS.txt --clobber
+          else
+            # Existing release: refresh body (always allowed). Asset re-upload
+            # is best-effort — immutable releases keep their published assets.
+            gh release edit v1.0.0 --repo "$REPO" --title "Vani AI v1.0.0" --notes-file /tmp/body.md --latest
+            if gh release upload v1.0.0 --repo "$REPO" \
+                dist/vani-ai-1.0.0-release.apk dist/vani-ai-1.0.0-source.zip dist/SHA256SUMS.txt --clobber; then
+              echo "Assets refreshed."
+            else
+              echo "Release is immutable — keeping published assets; body refreshed with hashes + mirrors."
+            fi
+          fi
+          echo "Release v1.0.0 finalized."
