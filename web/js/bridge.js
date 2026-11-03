@@ -17,9 +17,20 @@ window.VaniBridge = {
   _emit(event, payload) { dispatch(event, payload); },
 };
 
+// Defensive re-entrancy guard: a handler that (transitively) re-emits the same
+// event synchronously must never be able to recurse infinitely and freeze the
+// WebView main thread. Cap synchronous dispatch depth and drop runaway events.
+let dispatchDepth = 0;
 function dispatch(event, payload) {
   const set = listeners.get(event);
-  if (set) for (const cb of [...set]) { try { cb(payload); } catch (e) { console.error(event, e); } }
+  if (!set || set.size === 0) return;
+  if (dispatchDepth >= 64) { console.error('Vani: blocked runaway event recursion for', event); return; }
+  dispatchDepth++;
+  try {
+    for (const cb of [...set]) { try { cb(payload); } catch (e) { console.error(event, e); } }
+  } finally {
+    dispatchDepth--;
+  }
 }
 
 export const hasNative = () => typeof window.VaniNative !== 'undefined';

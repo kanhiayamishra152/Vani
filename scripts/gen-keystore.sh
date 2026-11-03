@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Vani AI — fresh v1.0.0 release signing key.
+# Vani AI — fresh v1.0.1 release signing key.
 # Priority: existing keystore.properties > CI secrets (base64) > brand-new key.
 # Never commit the keystore or passwords; CI uploads a generated key as a
 # protected artifact so it can be stored as secrets for future updates.
@@ -22,7 +22,7 @@ if [[ -n "${VANI_KEYSTORE_BASE64:-}" ]]; then
   KEYPASS="${VANI_KEY_PASSWORD:-$STOREPASS}"
   ALIAS="${VANI_KEY_ALIAS:-vani-v1}"
 else
-  echo "[keystore] generating BRAND-NEW v1.0.0 release key (vani-v1.jks)"
+  echo "[keystore] generating BRAND-NEW v1.0.1 release key (vani-v1.jks)"
   STOREPASS="${VANI_KEYSTORE_PASSWORD:-$(openssl rand -hex 16)}"
   KEYPASS="${VANI_KEY_PASSWORD:-$STOREPASS}"
   ALIAS="vani-v1"

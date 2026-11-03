@@ -19,7 +19,9 @@ function nav(tab) {
   currentTab = tab;
   $$('.screen').forEach(s => s.classList.toggle('active', s.id === `screen-${tab}`));
   $$('#tabbar .tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
-  emitLocal('nav', tab);
+  // Notify listeners on a SEPARATE event. nav() also listens to 'nav' (command
+  // channel), so emitting 'nav' here would recurse infinitely and freeze the UI.
+  emitLocal('tab.changed', tab);
   syncBackState();
 }
 
@@ -154,7 +156,7 @@ function boot() {
   initLive();
   refreshStatus();
   nav('chat');
-  console.log('%cVani AI v1.0.0', 'font-weight:bold', hasNative() ? '(Android bridge active)' : '(browser preview)');
+  console.log('%cVani AI v1.0.1', 'font-weight:bold', hasNative() ? '(Android bridge active)' : '(browser preview)');
 }
 
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);

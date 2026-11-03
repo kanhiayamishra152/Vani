@@ -200,7 +200,7 @@ export async function renderSettings() {
 
   const about = $('#sec-about');
   about.innerHTML = `
-    <div class="settings-row"><div class="row-text"><span class="row-title">Vani AI</span><span class="row-desc">Version 1.0.0 (1) · ai.vani.app · build ${esc(buildInfo?.commit || 'dev')}</span></div><img src="assets/logo-mark.svg" style="width:30px;height:30px" alt=""></div>
+    <div class="settings-row"><div class="row-text"><span class="row-title">Vani AI</span><span class="row-desc">Version 1.0.1 (2) · ai.vani.app · build ${esc(buildInfo?.commit || 'dev')}</span></div><img src="assets/logo-mark.svg" style="width:30px;height:30px" alt=""></div>
     <div class="settings-row"><div class="row-text"><span class="row-title">Private by design</span><span class="row-desc">Inference, speech and chat history stay on this device. Models download only from the sources you choose.</span></div></div>
     <div class="settings-row"><div class="row-text"><span class="row-title">Open source</span><span class="row-desc">llama.cpp · sherpa-onnx · three.js · three-vrm · KaTeX</span></div><button class="btn-secondary" id="about-repo" style="padding:8px 14px;font-size:13px">${icon('link')}<span>GitHub</span></button></div>`;
   about.querySelector('#about-repo').addEventListener('click', () => {
@@ -212,7 +212,7 @@ export async function renderSettings() {
 /* ============================ init ============================ */
 export function initSettings() {
   fetch('build-info.json').then(r => r.json()).then(j => { buildInfo = j; }).catch(() => {});
-  on('nav', async t => {
+  on('tab.changed', async t => {
     clearInterval(pollTimer);
     if (t === 'settings') {
       await renderSettings();

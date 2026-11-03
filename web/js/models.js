@@ -380,8 +380,8 @@ export function initModels() {
   on('download.done', () => { refreshModels(); });
   on('download.state', () => { refreshModels(); });
   on('models.changed', refreshModels);
-  on('llm.status', () => { if ($('#screen-models').classList.contains('active')) renderHub(); });
+  on('llm.statusChanged', () => { if ($('#screen-models').classList.contains('active')) renderHub(); });
   on('settings.changed', () => { if ($('#screen-models').classList.contains('active')) renderHub(); });
-  on('nav', t => { if (t === 'models') refreshModels(); });
+  on('tab.changed', t => { if (t === 'models') refreshModels(); });
   refreshModels();
 }

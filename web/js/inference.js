@@ -20,7 +20,7 @@ function applyStatus(s) {
   llm.state = s.state || 'idle';
   llm.info = s.state === 'ready' ? s : null;
   llm.error = s.error || null;
-  emitLocal('llm.status', { ...llm });
+  emitLocal('llm.statusChanged', { ...llm });
 }
 
 on('llm.status', applyStatus);
@@ -28,7 +28,7 @@ on('llm.status', applyStatus);
 export async function loadModel(entry, mmprojEntry) {
   if (!hasNative()) throw new Error('Install the Android app to load models');
   llm.state = 'loading'; llm.error = null;
-  emitLocal('llm.status', { ...llm });
+  emitLocal('llm.statusChanged', { ...llm });
   try {
     const s = await invoke('llm.load', {
       path: entry.path,
@@ -43,7 +43,7 @@ export async function loadModel(entry, mmprojEntry) {
     return s;
   } catch (e) {
     llm.state = 'error'; llm.error = e.message;
-    emitLocal('llm.status', { ...llm });
+    emitLocal('llm.statusChanged', { ...llm });
     throw e;
   }
 }

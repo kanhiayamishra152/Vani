@@ -4,7 +4,7 @@
 models, talk to an expressive VRM avatar, and download everything straight to
 your phone — no cloud, no accounts, no telemetry.
 
-- **Package:** `ai.vani.app` · **Version:** 1.0.0 (versionCode 1)
+- **Package:** `ai.vani.app` · **Version:** 1.0.1 (versionCode 2)
 - **Target device:** Poco M6 Plus 5G (Snapdragon 4 Gen 2, Adreno 613, 8 GB RAM, HyperOS)
 - **ABI:** `arm64-v8a` · **minSdk:** 26 (Android 8.0) · **targetSdk:** 34
 
@@ -54,7 +54,7 @@ Pushing to `main` (or running **Build Vani AI APK** manually) executes
 2. Fetch + texture-optimize the OC-Lily VRM from Drive
 3. Generate icons, bundle the web app, sign with a fresh `vani-v1.jks`
 4. `assembleRelease` → `zipalign` → `apksigner verify`
-5. Upload the APK + source ZIP as artifacts and publish **Release v1.0.0**
+5. Upload the APK + source ZIP as artifacts and publish **Release v1.0.1**
 
 To reuse a fixed signing key across builds, add repository secrets
 `KEYSTORE_BASE64`, `KEYSTORE_PASSWORD`, `KEY_PASSWORD`, `KEY_ALIAS`.
@@ -69,8 +69,8 @@ npm ci
 
 This builds the web bundle, prepares native deps + avatar + icons, signs a
 fresh keystore, and (when an Android SDK + Gradle are present) assembles,
-aligns, and verifies `dist/vani-ai-1.0.0-release.apk`, then packages
-`dist/vani-ai-1.0.0-source.zip`. Without an SDK it still produces the source
+aligns, and verifies `dist/vani-ai-1.0.1-release.apk`, then packages
+`dist/vani-ai-1.0.1-source.zip`. Without an SDK it still produces the source
 ZIP and reports that the APK step runs in CI. Flags: `--skip-native`,
 `--skip-vrm`, `--no-upload`.
 

@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       publish_release:
-        description: "Publish GitHub Release v1.0.0"
+        description: "Publish GitHub Release v1.0.1"
         type: boolean
         default: true
 
@@ -113,7 +113,7 @@ jobs:
             # gen-keystore.sh creates the JKS AND a matching keystore.properties
             # (random password when no secret is set). Do not overwrite it.
             bash scripts/gen-keystore.sh
-            echo "Generated fresh v1 keystore"
+            echo "Reusing committed v1 keystore (gen-keystore.sh keeps it if present, else generates)"
           fi
 
       - name: Assemble release APK
@@ -154,7 +154,7 @@ jobs:
             BT=$(dirname "$(find "$ANDROID_HOME/build-tools" -name zipalign 2>/dev/null | sort -V | tail -1)")
           fi
           RAW=$(find android/app/build/outputs/apk/release -name '*.apk' | head -1)
-          OUT=dist/vani-ai-1.0.0-release.apk
+          OUT=dist/vani-ai-1.0.1-release.apk
           echo "RAW=$RAW"; echo "BT=$BT"
           cp "$RAW" "$OUT"
           # AGP already zipaligns + signs. Verify alignment non-destructively;
@@ -179,22 +179,22 @@ jobs:
       - name: SHA-256 hashes
         run: |
           cd dist
-          sha256sum vani-ai-1.0.0-release.apk vani-ai-1.0.0-source.zip | tee SHA256SUMS.txt
+          sha256sum vani-ai-1.0.1-release.apk vani-ai-1.0.1-source.zip | tee SHA256SUMS.txt
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: vani-ai-1.0.0-release-apk
+          name: vani-ai-1.0.1-release-apk
           path: |
-            dist/vani-ai-1.0.0-release.apk
+            dist/vani-ai-1.0.1-release.apk
             dist/SHA256SUMS.txt
           if-no-files-found: error
 
       - name: Upload source ZIP artifact
         uses: actions/upload-artifact@v4
         with:
-          name: vani-ai-1.0.0-source
-          path: dist/vani-ai-1.0.0-source.zip
+          name: vani-ai-1.0.1-source
+          path: dist/vani-ai-1.0.1-source.zip
           if-no-files-found: error
 
       - name: Mirror published assets to gofile.io
@@ -204,16 +204,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         run: |
-          # If v1.0.0 already exists (it may be immutable), mirror ITS exact
+          # If v1.0.1 already exists (it may be immutable), mirror ITS exact
           # assets so the gofile links + hashes match the published release.
-          if gh release view v1.0.0 --repo "$REPO" >/dev/null 2>&1; then
-            gh release download v1.0.0 --repo "$REPO" \
-              -p 'vani-ai-1.0.0-release.apk' -p 'vani-ai-1.0.0-source.zip' -p 'SHA256SUMS.txt' \
+          if gh release view v1.0.1 --repo "$REPO" >/dev/null 2>&1; then
+            gh release download v1.0.1 --repo "$REPO" \
+              -p 'vani-ai-1.0.1-release.apk' -p 'vani-ai-1.0.1-source.zip' -p 'SHA256SUMS.txt' \
               -D dist --clobber || true
           fi
           bash scripts/upload-gofile.sh
 
-      - name: Publish / refresh Release v1.0.0 (immutability-aware)
+      - name: Publish / refresh Release v1.0.1 (immutability-aware)
         if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_release)
         env:
           GH_TOKEN: ${{ github.token }}
@@ -232,21 +232,21 @@ jobs:
           else
             printf '\n_Mirrors: gofile.io upload unavailable for this run._\n' >> /tmp/body.md
           fi
-          if ! gh release view v1.0.0 --repo "$REPO" >/dev/null 2>&1; then
+          if ! gh release view v1.0.1 --repo "$REPO" >/dev/null 2>&1; then
             # Fresh release: create + upload assets.
-            gh release create v1.0.0 --repo "$REPO" --target "$GITHUB_SHA" \
-              --title "Vani AI v1.0.0" --notes-file /tmp/body.md --latest
-            gh release upload v1.0.0 --repo "$REPO" \
-              dist/vani-ai-1.0.0-release.apk dist/vani-ai-1.0.0-source.zip dist/SHA256SUMS.txt --clobber
+            gh release create v1.0.1 --repo "$REPO" --target "$GITHUB_SHA" \
+              --title "Vani AI v1.0.1" --notes-file /tmp/body.md --latest
+            gh release upload v1.0.1 --repo "$REPO" \
+              dist/vani-ai-1.0.1-release.apk dist/vani-ai-1.0.1-source.zip dist/SHA256SUMS.txt --clobber
           else
             # Existing release: refresh body (always allowed). Asset re-upload
             # is best-effort — immutable releases keep their published assets.
-            gh release edit v1.0.0 --repo "$REPO" --title "Vani AI v1.0.0" --notes-file /tmp/body.md --latest
-            if gh release upload v1.0.0 --repo "$REPO" \
-                dist/vani-ai-1.0.0-release.apk dist/vani-ai-1.0.0-source.zip dist/SHA256SUMS.txt --clobber; then
+            gh release edit v1.0.1 --repo "$REPO" --title "Vani AI v1.0.1" --notes-file /tmp/body.md --latest
+            if gh release upload v1.0.1 --repo "$REPO" \
+                dist/vani-ai-1.0.1-release.apk dist/vani-ai-1.0.1-source.zip dist/SHA256SUMS.txt --clobber; then
               echo "Assets refreshed."
             else
               echo "Release is immutable — keeping published assets; body refreshed with hashes + mirrors."
             fi
           fi
-          echo "Release v1.0.0 finalized."
+          echo "Release v1.0.1 finalized."
