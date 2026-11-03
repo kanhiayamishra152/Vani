@@ -176,6 +176,7 @@ jobs:
       - name: Align + verify Android installer compatibility
         run: |
           set -euo pipefail
+          exec > >(tee /tmp/vani-package-gate.log) 2>&1
           mkdir -p dist
           BT="$ANDROID_HOME/build-tools/${ANDROID_BUILD_TOOLS}"
           if [ ! -x "$BT/zipalign" ]; then
@@ -238,6 +239,32 @@ jobs:
           fi
           echo "APK certificate matches the tracked v1 key: $APK_CERT"
           ls -lh "$OUT"
+
+      - name: Report APK package verification failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          {
+            echo "## APK verification failure (run ${{ github.run_id }})";
+            echo "Commit: $GITHUB_SHA";
+            for f in /tmp/vani-package-gate.log /tmp/vani-badging.txt /tmp/vani-manifest.txt /tmp/vani-apk-signature.txt /tmp/vani-apk-zip-test.log; do
+              if [ -f "$f" ]; then
+                echo; echo "### $f"; echo '```';
+                tail -n 220 "$f";
+                echo '```';
+              fi
+            done
+            if compgen -G 'dist/*.apk' > /dev/null; then
+              echo; echo '### APK files'; ls -lh dist/*.apk;
+            fi
+          } > /tmp/vani-apk-diagnostic.md
+          BODY=$(python3 -c "import json; print(json.dumps({'title':'APK package verification diagnostic','body':open('/tmp/vani-apk-diagnostic.md').read()[:60000]}))")
+          curl -fsSL -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$REPO/issues" -d "$BODY" >/dev/null
 
       - name: Package source ZIP
         run: bash scripts/make-source-zip.sh
