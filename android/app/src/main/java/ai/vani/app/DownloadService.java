@@ -243,7 +243,7 @@ public class DownloadService extends Service {
             con.setConnectTimeout(30000);
             con.setReadTimeout(30000);
             con.setInstanceFollowRedirects(false);
-            con.setRequestProperty("User-Agent", "VaniAI/1.4.0 (Android)");
+            con.setRequestProperty("User-Agent", "VaniAI/1.5.0 (Android)");
             if (offset > 0) con.setRequestProperty("Range", "bytes=" + offset + "-");
             code = con.getResponseCode();
             if (code == 301 || code == 302 || code == 303 || code == 307 || code == 308) {

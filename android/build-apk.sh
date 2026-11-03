@@ -82,17 +82,17 @@ if [ -n "$SDK" ] && [ -n "$GRADLE" ]; then
   RAW=$(find android/app/build/outputs/apk/release -name '*.apk' | head -1)
   if [ -n "$RAW" ]; then
     if [ -n "$BT" ]; then
-      "$BT/zipalign" -f -p 4 "$RAW" "$DIST/vani-ai-1.4.0-release.apk"
-      if "$BT/apksigner" verify --print-certs "$DIST/vani-ai-1.4.0-release.apk" >/dev/null 2>&1; then
+      "$BT/zipalign" -f -p 4 "$RAW" "$DIST/vani-ai-1.5.0-release.apk"
+      if "$BT/apksigner" verify --print-certs "$DIST/vani-ai-1.5.0-release.apk" >/dev/null 2>&1; then
         echo "APK aligned + signature verified"
       else
-        cp "$RAW" "$DIST/vani-ai-1.4.0-release.apk"
+        cp "$RAW" "$DIST/vani-ai-1.5.0-release.apk"
         echo "WARN: apksigner verify failed; copied raw APK"
       fi
     else
-      cp "$RAW" "$DIST/vani-ai-1.4.0-release.apk"
+      cp "$RAW" "$DIST/vani-ai-1.5.0-release.apk"
     fi
-    APK_OUT="$DIST/vani-ai-1.4.0-release.apk"
+    APK_OUT="$DIST/vani-ai-1.5.0-release.apk"
   fi
 else
   echo "Android SDK or Gradle not found locally."
@@ -102,7 +102,7 @@ fi
 
 say "8/8 Source ZIP"
 bash scripts/make-source-zip.sh
-SRC_ZIP="$DIST/vani-ai-1.4.0-source.zip"
+SRC_ZIP="$DIST/vani-ai-1.5.0-source.zip"
 
 if [ "$NO_UPLOAD" = 0 ] && { [ -n "$APK_OUT" ] || [ -f "$SRC_ZIP" ]; }; then
   if have curl && curl -sf --max-time 8 https://api.gofile.io/servers >/dev/null 2>&1; then

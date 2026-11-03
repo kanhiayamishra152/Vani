@@ -84,4 +84,4 @@ meshes, morphs, spring bones and MToon materials remain original). Runtime
 DPR/MSAA caps and the native memory watchdog handle device pressure without
 lossy asset preprocessing. `scripts/build-web.mjs` bundles the web app into
 Android assets. Gradle + CMake build the native libraries and APK; CI signs
-with the persisted `vani-v1.jks`, aligns, verifies, and publishes Release v1.4.0.
+with the persisted `vani-v1.jks`, aligns, verifies, and publishes Release v1.5.0.

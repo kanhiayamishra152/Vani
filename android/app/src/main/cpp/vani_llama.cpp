@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstring>
 #include <mutex>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -91,17 +92,53 @@ std::vector<unsigned char> base64_decode(const std::string & in) {
     return out;
 }
 
-// Longest prefix of s that ends on a complete UTF-8 code point.
+// Longest prefix of s that ends on a complete, structurally valid UTF-8
+// code point. llama byte pieces can split a code point across tokens; the
+// incomplete tail must stay in the native buffer until a later piece arrives.
 size_t utf8_complete_prefix(const std::string & s) {
     size_t i = 0, last = 0;
     while (i < s.size()) {
-        unsigned char c = (unsigned char) s[i];
-        int len = c < 0x80 ? 1 : (c >> 5) == 0x6 ? 2 : (c >> 4) == 0xe ? 3 : (c >> 3) == 0x1e ? 4 : 1;
-        if (i + len > s.size()) break;
+        const unsigned char c = (unsigned char) s[i];
+        int len = 0;
+        if (c <= 0x7f) len = 1;
+        else if (c >= 0xc2 && c <= 0xdf) len = 2;
+        else if (c >= 0xe0 && c <= 0xef) len = 3;
+        else if (c >= 0xf0 && c <= 0xf4) len = 4;
+        else { i++; last = i; continue; } // isolated invalid byte: Java replaces it safely
+        if (i + len > s.size()) break;   // incomplete code point: retain it
+        bool valid = true;
+        for (int k = 1; k < len; k++) {
+            const unsigned char d = (unsigned char) s[i + k];
+            if ((d & 0xc0) != 0x80) { valid = false; break; }
+        }
+        if (valid && len >= 3) {
+            const unsigned char d = (unsigned char) s[i + 1];
+            if ((c == 0xe0 && d < 0xa0) || (c == 0xed && d > 0x9f) ||
+                (c == 0xf0 && d < 0x90) || (c == 0xf4 && d > 0x8f)) valid = false;
+        }
+        if (!valid) { i++; last = i; continue; }
         i += len;
         last = i;
     }
     return last;
+}
+
+// Do not stream a suffix that may be the beginning of a stop string. This
+// keeps stop detection atomic across token/chunk boundaries and ensures a
+// later stop match can never move the emitted-byte cursor backwards.
+size_t stop_prefix_suffix(const std::string & s, const std::vector<std::string> & stops) {
+    size_t hold = 0;
+    for (const auto & stop : stops) {
+        if (stop.empty()) continue;
+        const size_t max = std::min(s.size(), stop.size() - 1);
+        for (size_t n = max; n > 0; n--) {
+            if (s.compare(s.size() - n, n, stop, 0, n) == 0) {
+                hold = std::max(hold, n);
+                break;
+            }
+        }
+    }
+    return hold;
 }
 
 std::vector<llama_token> tokenize(const llama_vocab * vocab, const std::string & text, bool add_special) {
@@ -268,7 +305,12 @@ JNIEXPORT void JNICALL Java_ai_vani_app_LlmEngine_nativeGenerate(
         }
         common_chat_params cparams = common_chat_templates_apply(v->tmpls.get(), inputs);
         std::string prompt = cparams.prompt.str();
-        const auto & stopStrings = cparams.additional_stops;
+        // Some chat templates expose an empty additional stop. std::string::find("")
+        // matches at offset zero, which used to truncate the very first token.
+        std::vector<std::string> stopStrings;
+        for (const auto & stop : cparams.additional_stops) {
+            if (!stop.empty()) stopStrings.push_back(stop);
+        }
 
         // ---- sampling ----
         common_params_sampling sp;
@@ -277,11 +319,17 @@ JNIEXPORT void JNICALL Java_ai_vani_app_LlmEngine_nativeGenerate(
         sp.top_p = topP;
         sp.penalty_repeat = repeat;
         sp.seed = (uint32_t) std::chrono::steady_clock::now().time_since_epoch().count();
-        common_sampler * smpl = common_sampler_init(v->model, sp);
+        std::unique_ptr<common_sampler, decltype(&common_sampler_free)> smplOwner(
+                common_sampler_init(v->model, sp), &common_sampler_free);
+        common_sampler * smpl = smplOwner.get();
         if (!smpl) { cb.error("Failed to initialize the sampler"); return; }
 
         llama_memory_t mem = llama_get_memory(v->ctx);
         const int n_ctx = (int) llama_n_ctx(v->ctx);
+        auto invalidateCache = [&]() {
+            llama_memory_clear(mem, true);
+            v->prev_tokens.clear();
+        };
         llama_pos n_past = 0;
         size_t n_prompt = 0;
         size_t cachedTokens = 0;
@@ -316,7 +364,6 @@ JNIEXPORT void JNICALL Java_ai_vani_app_LlmEngine_nativeGenerate(
             if (rc != 0) {
                 for (auto * b : bitmaps) mtmd_bitmap_free(b);
                 mtmd_input_chunks_free(chunks);
-                common_sampler_free(smpl);
                 cb.error("Failed to tokenize image input");
                 return;
             }
@@ -326,26 +373,33 @@ JNIEXPORT void JNICALL Java_ai_vani_app_LlmEngine_nativeGenerate(
             n_past = new_past;
             for (auto * b : bitmaps) mtmd_bitmap_free(b);
             mtmd_input_chunks_free(chunks);
-            if (rc != 0) { common_sampler_free(smpl); cb.error("Image evaluation failed"); return; }
+            if (rc != 0) { cb.error("Image evaluation failed"); return; }
             v->prev_tokens.clear();
         } else {
             // ---- text path with prefix KV-cache reuse ----
             prompt_tokens = tokenize(v->vocab, prompt, false);
-            if (prompt_tokens.empty()) { common_sampler_free(smpl); cb.error("Empty prompt"); return; }
+            if (prompt_tokens.empty()) { cb.error("Empty prompt"); return; }
             promptTokenCount = prompt_tokens.size();
             size_t keep = 0;
             while (keep < v->prev_tokens.size() && keep < prompt_tokens.size()
                    && v->prev_tokens[keep] == prompt_tokens[keep]) keep++;
             cachedTokens = keep;
             evaluatedPromptTokens = keep;
-            llama_memory_seq_rm(mem, 0, (llama_pos) keep, -1);
+            if (!llama_memory_seq_rm(mem, 0, (llama_pos) keep, -1)) {
+                // If sequence trimming is unsupported, never pretend the old
+                // token prefix still describes the actual KV memory contents.
+                invalidateCache();
+                keep = 0;
+                cachedTokens = 0;
+                evaluatedPromptTokens = 0;
+            }
             n_past = (llama_pos) keep;
             for (size_t i = keep; i < prompt_tokens.size() && !v->stop; ) {
                 int32_t n = (int32_t) std::min<size_t>(v->n_batch, prompt_tokens.size() - i);
                 llama_batch batch = llama_batch_get_one(prompt_tokens.data() + i, n);
                 if (llama_decode(v->ctx, batch) != 0) {
-                    common_sampler_free(smpl);
-                    cb.error("Prompt evaluation failed (context overflow?)");
+                    invalidateCache();
+                    cb.error("Prompt evaluation failed: the context window or mobile memory budget was exceeded");
                     return;
                 }
                 i += n;
@@ -364,10 +418,17 @@ JNIEXPORT void JNICALL Java_ai_vani_app_LlmEngine_nativeGenerate(
         const double promptMs = std::chrono::duration<double, std::milli>(promptDone - requestStart).count();
         // Never ask the sampler to write beyond the actual context window.
         maxTokens = std::max(0, std::min(maxTokens, n_ctx - (int) n_past));
-        std::string full, pending, batchBuf;
+        if (maxTokens <= 0) {
+            if (!hasImages) v->prev_tokens = prompt_tokens;
+            cb.error("The context window is full. Start a new chat or increase n_ctx before generating again.");
+            return;
+        }
+        std::string full, batchBuf;
         size_t emitted = 0;
+        size_t stopAt = std::string::npos;
         int n_gen = 0, sinceFlush = 0;
         bool stopped = false;
+        bool hitStop = false;
         double ttftMs = -1;
         auto lastFlush = std::chrono::steady_clock::now();
         auto flush = [&](bool force) {
@@ -381,6 +442,21 @@ JNIEXPORT void JNICALL Java_ai_vani_app_LlmEngine_nativeGenerate(
                 lastFlush = std::chrono::steady_clock::now();
             }
         };
+        auto emitAvailable = [&](bool final) {
+            const size_t limit = hitStop ? std::min(stopAt, full.size()) : full.size();
+            if (limit <= emitted) return; // also protects a stop at/before the cursor
+            const std::string pending = full.substr(emitted, limit - emitted);
+            size_t valid = utf8_complete_prefix(pending);
+            if (!final && !hitStop && valid > 0) {
+                const size_t hold = stop_prefix_suffix(pending.substr(0, valid), stopStrings);
+                valid -= std::min(valid, hold);
+            }
+            if (valid > 0) {
+                batchBuf += pending.substr(0, valid);
+                emitted += valid;
+                sinceFlush++;
+            }
+        };
 
         while (n_gen < maxTokens) {
             if (v->stop) { stopped = true; break; }
@@ -391,15 +467,13 @@ JNIEXPORT void JNICALL Java_ai_vani_app_LlmEngine_nativeGenerate(
 
             if (ttftMs < 0) ttftMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - requestStart).count();
             full += token_piece(v->vocab, tok);
-            bool hitStop = false;
-            for (const auto & s : stopStrings) {
-                size_t p = full.find(s);
-                if (p != std::string::npos) { full.resize(p); hitStop = true; break; }
+            for (const auto & s : stopStrings) { // empty template stops were filtered above
+                const size_t p = full.find(s);
+                if (p != std::string::npos) { stopAt = p; hitStop = true; break; }
             }
-            // Buffer only complete UTF-8 (pieces can split multi-byte chars).
-            pending = full.substr(emitted);
-            size_t valid = hitStop ? pending.size() : utf8_complete_prefix(pending);
-            if (valid > 0) { batchBuf += pending.substr(0, valid); emitted += valid; sinceFlush++; }
+            // Keep split UTF-8 bytes and possible stop-string prefixes buffered.
+            // Never resize `full`: emitted remains a valid, monotonic cursor.
+            emitAvailable(false);
             flush(hitStop);
             if (hitStop) break;
 
@@ -409,12 +483,12 @@ JNIEXPORT void JNICALL Java_ai_vani_app_LlmEngine_nativeGenerate(
             if (llama_decode(v->ctx, batch) != 0) { decodeFailed = true; break; }
             n_past++;
         }
-        if (emitted < full.size()) batchBuf += full.substr(emitted);
-        flush(true); // final partial batch
+        emitAvailable(true); // release a false partial-stop suffix at natural EOF
+        flush(true);         // final complete-UTF-8 batch
 
         if (decodeFailed) {
-            common_sampler_free(smpl);
-            cb.error("Token evaluation failed; partial response discarded");
+            invalidateCache();
+            cb.error("Token evaluation failed. Any text already streamed has been kept; please retry.");
             return;
         }
         if (!hasImages) {
@@ -423,8 +497,11 @@ JNIEXPORT void JNICALL Java_ai_vani_app_LlmEngine_nativeGenerate(
             if (evaluatedPromptTokens < promptTokenCount) prompt_tokens.resize(evaluatedPromptTokens);
             v->prev_tokens = std::move(prompt_tokens);
         }
-        common_sampler_free(smpl);
 
+        if (!stopped && emitted == 0) {
+            cb.error("The model ended without producing text. No partial UTF-8 or template stop bytes were emitted; please try again.");
+            return;
+        }
         double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         common_json stats = common_json::object();
         stats["tokens"] = n_gen;

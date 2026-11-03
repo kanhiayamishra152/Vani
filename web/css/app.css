@@ -293,6 +293,13 @@ textarea, input { font-family: inherit; }
 
 .hub-actions { display: flex; gap: 8px; margin-bottom: 16px; }
 .hub-actions .btn-secondary { flex: 1; font-size: 13px; padding: 10px 8px; }
+.omni-notice {
+  display: flex; align-items: flex-start; gap: 9px; margin: 0 0 14px; padding: 11px 13px;
+  border: 1px solid var(--hairline); border-radius: 12px; background: var(--surface-2);
+  color: var(--text-2); font-size: 12.5px; line-height: 1.45;
+}
+.omni-notice svg { width: 17px; height: 17px; flex: 0 0 auto; margin-top: 1px; color: var(--text); }
+button:disabled { opacity: .48; cursor: not-allowed; }
 
 .model-card {
   background: var(--surface-1); border: 1px solid var(--hairline); border-radius: var(--radius);

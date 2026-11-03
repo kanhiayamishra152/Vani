@@ -53,6 +53,8 @@ public class MainActivity extends Activity {
     CrashGuard crashGuard;
     final Handler main = new Handler(Looper.getMainLooper());
     final ExecutorService io = Executors.newCachedThreadPool();
+    /** Serializes cross-engine admission decisions; native work stays off the UI thread. */
+    private final Object modelLifecycleLock = new Object();
 
     private volatile boolean jsHandlesBack = false;
     volatile String pageOrigin = ASSET_ORIGIN;
@@ -163,6 +165,60 @@ public class MainActivity extends Activity {
             try { resolve(pendingMicCb, true, new JSONObject().put("granted", granted).toString()); }
             catch (Exception e) { resolve(pendingMicCb, true, "{\"granted\":" + granted + "}"); }
             pendingMicCb = null;
+        }
+    }
+
+    /* ---------------- strict model-memory admission ---------------- */
+
+    private void rejectModelRequest(String id, String message) {
+        try { resolve(id, false, new JSONObject().put("error", message).toString()); }
+        catch (Exception e) { resolve(id, false, "{\"error\":\"Model request rejected\"}"); }
+    }
+
+    void loadLlm(JSONObject a, String id) {
+        synchronized (modelLifecycleLock) {
+            boolean wantsOmni = LlmEngine.isOmniRequest(a);
+            if (!wantsOmni && llm.isOmni()) {
+                rejectModelRequest(id, "LFM3-Omni-2B is active. Unload it before loading another model.");
+                return;
+            }
+            if (wantsOmni) {
+                try {
+                    // This completes BEFORE nativeLoad allocates the Omni model.
+                    if (!speech.unloadAllBlocking()) {
+                        rejectModelRequest(id, "Voice models could not be released safely. Omni was not loaded; try again.");
+                        return;
+                    }
+                } catch (Throwable t) {
+                    Log.e(TAG, "Omni pre-unload", t);
+                    rejectModelRequest(id, "Could not isolate memory for Omni: " + t.getMessage());
+                    return;
+                }
+            }
+            llm.load(a, id); // serialized internally: replaces at most one Main LLM
+        }
+    }
+
+    void configureTts(JSONObject a, String id) {
+        synchronized (modelLifecycleLock) {
+            String engine = a.optString("engine", "phonon");
+            if (!"system".equals(engine) && llm.isOmni()) {
+                rejectModelRequest(id, "Omni isolation is active. Unload LFM3-Omni-2B before loading a standalone voice.");
+                return;
+            }
+            speech.configureTts(a, id);
+        }
+    }
+
+    void loadAsr(JSONObject a, String id, boolean startCapture) {
+        synchronized (modelLifecycleLock) {
+            String engine = a.optString("engine", startCapture ? "system" : "whisper");
+            if (!"system".equals(engine) && llm.isOmni()) {
+                rejectModelRequest(id, "Omni isolation is active. Unload LFM3-Omni-2B before loading a standalone ASR model.");
+                return;
+            }
+            if (startCapture) speech.startAsr(a, id);
+            else speech.loadAsr(a, id);
         }
     }
 

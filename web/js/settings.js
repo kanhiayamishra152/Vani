@@ -5,9 +5,9 @@ import { toast } from './toast.js';
 import { invoke, on, hasNative, emitLocal } from './bridge.js';
 import { settings, setSetting, resetSettings, clearAllThreads, getModelThinking, setModelThinking } from './store.js';
 import { openPromptStudio } from './prompts.js';
-import { llm } from './inference.js';
+import { llm, unloadModel } from './inference.js';
 import { SUPP_MODELS } from './catalog.js';
-import { configureVoice, previewVoice } from './voice.js';
+import { configureVoice, previewVoice, refreshSpeechStatus, speechRuntime, unloadVoice, unloadAsrModel } from './voice.js';
 
 let device = null;
 let gpuName = null;
@@ -112,6 +112,46 @@ function rowButton(title, desc, btnLabel, ic, fn, danger = false) {
 }
 
 /* ============================ render ============================ */
+function renderMemorySection() {
+  const root = $('#sec-memory');
+  if (!root) return;
+  root.innerHTML = '';
+  const rows = [];
+  if (llm.state === 'ready') rows.push(rowButton(
+    llm.info?.name || 'Main LLM',
+    `${llm.info?.omni ? 'Omni isolated' : 'Main LLM'} · In RAM · downloaded files are kept after unload.`,
+    'Unload', 'x', async () => {
+      try { await unloadModel(); toast('Main model unloaded from RAM'); }
+      catch (e) { toast('Unload failed: ' + e.message); }
+      renderMemorySection();
+    },
+  ));
+  if (speechRuntime.tts.state === 'ready') rows.push(rowButton(
+    speechRuntime.tts.name || speechRuntime.tts.modelId || 'Neural voice',
+    'Standalone TTS · In RAM · Preview and playback use this native instance.',
+    'Unload', 'x', async () => {
+      try { await unloadVoice(); toast('Voice unloaded from RAM'); }
+      catch (e) { toast('Unload failed: ' + e.message); }
+      renderMemorySection();
+    },
+  ));
+  if (speechRuntime.asr.state === 'ready') rows.push(rowButton(
+    speechRuntime.asr.name || speechRuntime.asr.modelId || 'Offline ASR',
+    'Standalone ASR · In RAM · stopping the mic does not unload it.',
+    'Unload', 'x', async () => {
+      try { await unloadAsrModel(); toast('ASR unloaded from RAM'); }
+      catch (e) { toast('Unload failed: ' + e.message); }
+      renderMemorySection();
+    },
+  ));
+  if (!rows.length) {
+    const empty = el('div', 'settings-row');
+    empty.innerHTML = '<div class="row-text"><span class="row-title">No models in RAM</span><span class="row-desc">Installed files remain on disk. Load models from Model Hub when needed.</span></div>';
+    rows.push(empty);
+  }
+  root.append(...rows);
+}
+
 export async function renderSettings() {
   const root = $('#settings-scroll');
   await measure();
@@ -133,6 +173,7 @@ export async function renderSettings() {
       </div>
       <div class="settings-card mt8" id="sec-hw-actions"></div>
     </div>
+    <div class="settings-section"><div class="settings-section-title">Model memory</div><div class="settings-card" id="sec-memory"></div></div>
     <div class="settings-section"><div class="settings-section-title">Inference</div><div class="settings-card" id="sec-inference"></div></div>
     <div class="settings-section"><div class="settings-section-title">Voice</div><div class="settings-card" id="sec-voice"></div></div>
     <div class="settings-section"><div class="settings-section-title">Live Talk & Battery</div><div class="settings-card" id="sec-battery"></div></div>
@@ -140,6 +181,7 @@ export async function renderSettings() {
     <div class="settings-section"><div class="settings-section-title">Data</div><div class="settings-card" id="sec-data"></div></div>
     <div class="settings-section"><div class="settings-section-title">About</div><div class="settings-card" id="sec-about"></div></div>`;
 
+  renderMemorySection();
   $('#sec-hw-actions').append(rowButton('Re-measure and auto-tune', 'Probe free RAM and CPU, then pick the best context window and thread count.', 'Re-measure', 'refresh', async () => {
     await measure();
     const t = autoTune(true);
@@ -254,7 +296,7 @@ export async function renderSettings() {
 
   const about = $('#sec-about');
   about.innerHTML = `
-    <div class="settings-row"><div class="row-text"><span class="row-title">Vani AI</span><span class="row-desc">Version 1.4.0 (5) · ai.vani.app · build ${esc(buildInfo?.commit || 'dev')}</span></div><img src="assets/logo-mark.svg" style="width:30px;height:30px" alt=""></div>
+    <div class="settings-row"><div class="row-text"><span class="row-title">Vani AI</span><span class="row-desc">Version 1.5.0 (6) · ai.vani.app · build ${esc(buildInfo?.commit || 'dev')}</span></div><img src="assets/logo-mark.svg" style="width:30px;height:30px" alt=""></div>
     <div class="settings-row"><div class="row-text"><span class="row-title">Private by design</span><span class="row-desc">Inference, speech and chat history stay on this device. Models download only from the sources you choose.</span></div></div>
     <div class="settings-row"><div class="row-text"><span class="row-title">Open source</span><span class="row-desc">llama.cpp · sherpa-onnx · three.js · three-vrm · KaTeX</span></div><button class="btn-secondary" id="about-repo" style="padding:8px 14px;font-size:13px">${icon('link')}<span>GitHub</span></button></div>`;
   about.querySelector('#about-repo').addEventListener('click', () => {
@@ -267,8 +309,10 @@ export async function renderSettings() {
 export function initSettings() {
   fetch('build-info.json').then(r => r.json()).then(j => { buildInfo = j; }).catch(() => {});
   on('tab.changed', async t => {
-    if (t === 'settings') await renderSettings();
+    if (t === 'settings') { await refreshSpeechStatus(); await renderSettings(); }
   });
+  on('llm.statusChanged', () => { if ($('#screen-settings').classList.contains('active')) renderMemorySection(); });
+  on('speech.statusChanged', () => { if ($('#screen-settings').classList.contains('active')) renderMemorySection(); });
   on('settings.changed', p => {
     // Re-apply voice config live if Live Talk is running.
     if (['ttsEngine', 'ttsModelId', 'ttsSpeed', 'ttsSid', 'asrEngine', 'asrModelId'].includes(p.key)) emitLocal('voice.reconfigure', {});

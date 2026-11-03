@@ -1,4 +1,4 @@
-// Vani AI — native microphone capture, cancellable ASR and reliable neural TTS.
+// Vani AI — native microphone capture, explicit speech-model residency and TTS.
 // Android owns the only microphone consumer; this module never uses getUserMedia.
 import { invoke, on, hasNative, emitLocal } from './bridge.js';
 import { settings } from './store.js';
@@ -12,6 +12,32 @@ let dictationSession = null;
 const phonon = new Phonon();
 let currentUtter = null;
 let installedCache = [];
+let configuredKey = null;
+let configuring = null;
+let configuringKey = null;
+
+/** Actual native allocations, never merely the selected settings preference. */
+export const speechRuntime = {
+  tts: { state: 'idle', path: '', modelId: '' },
+  asr: { state: 'idle', path: '', modelId: '' },
+};
+
+function applySpeechStatus(s) {
+  if (s?.tts) speechRuntime.tts = { ...speechRuntime.tts, ...s.tts };
+  if (s?.asr) speechRuntime.asr = { ...speechRuntime.asr, ...s.asr };
+  if (s?.tts && s.tts.state !== 'ready') configuredKey = null;
+  emitLocal('speech.statusChanged', speechRuntime);
+}
+on('tts.status', s => applySpeechStatus({ tts: s }));
+on('asr.status', s => applySpeechStatus({ asr: s }));
+
+export async function refreshSpeechStatus() {
+  if (!hasNative()) return speechRuntime;
+  try { applySpeechStatus(await invoke('speech.status')); } catch {}
+  return speechRuntime;
+}
+export const isVoiceLoaded = entry => !!entry && speechRuntime.tts.state === 'ready' && speechRuntime.tts.path === entry.path;
+export const isAsrLoaded = entry => !!entry && speechRuntime.asr.state === 'ready' && speechRuntime.asr.path === entry.path;
 
 export async function refreshInstalled() {
   if (!hasNative()) { installedCache = []; return; }
@@ -28,10 +54,14 @@ const OFFLINE_ASR = ['whisper', 'moonshine', 'sensevoice', 'zipformer'];
 export function resolveAsr() {
   const eng = settings.asrEngine || 'auto';
   if (eng === 'system') return { engine: 'system', entry: null };
+  if (OFFLINE_ASR.includes(eng)) {
+    const selected = installedCache.find(m => m.kind === 'asr' && m.modelId === settings.asrModelId && (m.engine || 'whisper') === eng);
+    const entry = selected || installedCache.find(m => m.kind === 'asr' && (m.engine || 'whisper') === eng) || null;
+    return { engine: eng, entry };
+  }
   const entry = asrEntry();
   if (!entry) return { engine: 'system', entry: null };
-  const engine = (eng !== 'auto' && OFFLINE_ASR.includes(eng)) ? eng : (entry.engine || 'whisper');
-  return { engine, entry };
+  return { engine: entry.engine || 'whisper', entry };
 }
 export function voiceAvailable() { return hasNative(); }
 export function offlineVoiceReady() {
@@ -62,7 +92,7 @@ export async function startListening(mode, cbs = {}) {
   await refreshInstalled();
   if (requestSeq !== listenSeq) return;
   const { engine, entry } = resolveAsr();
-  if (engine !== 'system' && !entry) throw new Error('Install an ASR model from Model Hub → Supplementary');
+  if (engine !== 'system' && !entry) throw new Error(`Install a matching ${engine} model in Model Hub → Supplementary`);
   try {
     const res = await invoke('mic.ensurePermission');
     if (res && res.granted === false) throw new Error('Microphone permission denied — allow mic access to use voice input.');
@@ -72,7 +102,7 @@ export async function startListening(mode, cbs = {}) {
   }
   if (requestSeq !== listenSeq) return;
   await invoke('asr.start', {
-    engine, mode, dir: entry?.path || null,
+    engine, mode, dir: entry?.path || null, modelId: entry?.modelId || '', name: entry?.name || '',
     language: settings.asrLanguage || 'en', sensitivity: settings.vadSensitivity,
     once: !!cbs.once,
   });
@@ -89,6 +119,22 @@ export async function stopListening() {
 }
 export function pttRelease() { if (hasNative()) invoke('asr.pttRelease').catch(() => {}); }
 export const isListening = () => listening;
+
+/** Explicit supplementary-model lifecycle (no microphone permission needed). */
+export async function loadAsrModel(entry) {
+  if (!hasNative()) throw new Error('ASR models need the Android app');
+  const status = await invoke('asr.load', {
+    engine: entry.engine || 'whisper', dir: entry.path, modelId: entry.modelId || '', name: entry.name || '',
+    language: settings.asrLanguage || 'en',
+  });
+  applySpeechStatus({ asr: status });
+  return status;
+}
+export async function unloadAsrModel() {
+  await stopListening();
+  const status = await invoke('asr.unload');
+  applySpeechStatus({ asr: status });
+}
 
 /** One-shot, cancellable dictation. Cancellation resolves without inventing text. */
 export function dictateOnce({ onPartial } = {}) {
@@ -121,34 +167,43 @@ export async function stopDictation() {
 }
 
 /* ============================ TTS ============================ */
-let configuredKey = null;
-let configuring = null;
-let configuringKey = null;
 function voiceConfigKey() { return [settings.ttsEngine, settings.ttsModelId, settings.ttsSpeed, settings.ttsSid].join('|'); }
 
 /** Configure exactly the selected installed voice; never silently substitute one. */
 export function configureVoice() {
   if (!hasNative()) return Promise.resolve();
   const key = voiceConfigKey();
-  if (configuredKey === key) return Promise.resolve();
+  if (configuredKey === key && speechRuntime.tts.state === 'ready') return Promise.resolve();
+  if (settings.ttsEngine === 'system' && configuredKey === key) return Promise.resolve();
   if (configuring && configuringKey === key) return configuring;
   configuringKey = key;
   configuring = (async () => {
     await refreshInstalled();
     let dir = null;
+    let selectedEntry = null;
     const eng = settings.ttsEngine === 'phonon' ? 'vits' : settings.ttsEngine;
     if (['pocket', 'vits', 'kokoro', 'kitten'].includes(eng)) {
-      const entry = installedCache.find(m => (m.kind === 'tts' || m.kind === 'dir') && m.modelId === settings.ttsModelId);
-      dir = entry?.path || null;
+      selectedEntry = installedCache.find(m => (m.kind === 'tts' || m.kind === 'dir') && m.modelId === settings.ttsModelId);
+      dir = selectedEntry?.path || null;
       if (!dir) throw new Error('Install the selected voice in Model Hub → Supplementary before playing audio');
     }
-    await invoke('tts.configure', {
+    const status = await invoke('tts.configure', {
       engine: settings.ttsEngine, dir, speed: settings.ttsSpeed,
       sid: settings.ttsSid || 0, paradee: settings.ttsModelId === 'phonon-ultra',
+      modelId: selectedEntry?.modelId || '', name: selectedEntry?.name || '',
     });
     configuredKey = key;
+    if (status?.state) applySpeechStatus({ tts: status });
   })().finally(() => { configuring = null; configuringKey = null; });
   return configuring;
+}
+
+export async function unloadVoice() {
+  stopSpeech();
+  configuredKey = null;
+  if (!hasNative()) return;
+  const status = await invoke('tts.unload');
+  applySpeechStatus({ tts: status });
 }
 
 let ttsOffs = [];
@@ -174,7 +229,7 @@ function wireTts() {
 }
 
 let utterSeq = 0;
-/** Speak a preview with the selected speaker. The returned promise covers setup/request errors. */
+/** Speak a preview with the selected speaker. Each request owns a cancellable track. */
 export async function previewVoice(text, sid = settings.ttsSid) {
   if (!hasNative()) { phonon.speak(text, { rate: settings.ttsSpeed }); return; }
   wireTts();

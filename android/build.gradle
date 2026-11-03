@@ -1,4 +1,4 @@
-// Vani AI v1.4.0 — root build (clean-slate, zero legacy).
+// Vani AI v1.5.0 — root build (clean-slate, zero legacy).
 plugins {
     id 'com.android.application' version '8.5.2' apply false
     id 'org.jetbrains.kotlin.android' version '1.9.24' apply false

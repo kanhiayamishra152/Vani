@@ -58,9 +58,14 @@ function serve() {
 
 /* ----------------- native bridge mock (no model installed) ----------------- */
 const MOCK = `
-window.__vaniMock = { downloads: [], models: [], calls: [], holdGeneration: false, generationTimer: null, genId: null, lastGenerate: null };
+window.__vaniMock = {
+  downloads: [], models: [], calls: [], holdGeneration: false, generationTimer: null, genId: null, lastGenerate: null,
+  llm: { state: 'idle' }, tts: { state: 'idle', path: '' }, asr: { state: 'idle', path: '' },
+};
 window.__mockSetModel = (name, modelPath) => {
-  window.VaniBridge._emit('llm.status', { state: 'ready', name, modelPath, nCtx: 4096 });
+  const M = window.__vaniMock;
+  M.llm = { state: 'ready', name, modelPath, nCtx: 4096, omni: /lfm3[-_]omni/i.test(modelPath + ' ' + name) };
+  window.VaniBridge._emit('llm.status', M.llm);
 };
 window.__mockProgress = (id, received, total, speed, state) => {
   const d = window.__vaniMock.downloads.find(x => x.id === id);
@@ -78,9 +83,10 @@ window.VaniNative = {
     window.__vaniMock.calls.push(method);
     const M = window.__vaniMock;
     const ok = (payload) => setTimeout(() => window.VaniBridge._resolve(id, true, payload), 0);
+    const fail = (message) => setTimeout(() => window.VaniBridge._resolve(id, false, { error: message }), 0);
     switch (method) {
       case 'device.info': ok({ ramTotalBytes: 8 * 1073741824, ramAvailBytes: Math.round(4.6 * 1073741824), cores: 8, gpuHint: 'Adreno 613' }); break;
-      case 'llm.status': ok({ state: 'idle' }); break;
+      case 'llm.status': ok(M.llm); break;
       case 'models.list': ok(M.models); break;
       case 'downloads.list': ok(M.downloads); break;
       case 'downloads.start': {
@@ -90,8 +96,18 @@ window.VaniNative = {
       case 'downloads.pause': { const d = M.downloads.find(x => x.id === args.id); if (d) d.state = 'paused'; ok(null); setTimeout(() => window.VaniBridge._emit('download.state', { id: args.id }), 0); break; }
       case 'downloads.resume': { const d = M.downloads.find(x => x.id === args.id); if (d) d.state = 'downloading'; ok(null); setTimeout(() => window.VaniBridge._emit('download.state', { id: args.id }), 0); break; }
       case 'downloads.cancel': { M.downloads = M.downloads.filter(x => args.groupId ? x.groupId !== args.groupId : x.id !== args.id); ok(null); setTimeout(() => window.VaniBridge._emit('download.state', { id: args.id, groupId: args.groupId || '' }), 0); break; }
-      case 'llm.load': ok({ state: 'ready', name: args.name || 'Mock model', modelPath: args.path || '/models/mock.gguf', nCtx: 4096 }); break;
-      case 'llm.unload': ok({ state: 'idle' }); break;
+      case 'llm.load': {
+        const omni = /lfm3[-_]omni/i.test((args.path || '') + ' ' + (args.name || ''));
+        if (M.llm.omni && M.llm.state === 'ready' && !omni) { fail('Omni is active'); break; }
+        if (omni) {
+          M.tts = { state: 'idle', path: '' }; M.asr = { state: 'idle', path: '' };
+          window.VaniBridge._emit('tts.status', M.tts); window.VaniBridge._emit('asr.status', M.asr);
+        }
+        M.llm = { state: 'ready', name: args.name || 'Mock model', modelPath: args.path || '/models/mock.gguf', nCtx: args.nCtx || 4096, omni };
+        M.lastActive = M.llm.modelPath;
+        ok(M.llm); window.VaniBridge._emit('llm.status', M.llm); break;
+      }
+      case 'llm.unload': M.llm = { state: 'idle' }; M.lastActive = ''; ok(M.llm); window.VaniBridge._emit('llm.status', M.llm); break;
       case 'llm.generate': {
         M.lastGenerate = args; M.genId = args.genId; ok(null);
         const toks = ['Hello', ' from', ' Vani', '!']; let i = 0;
@@ -113,9 +129,31 @@ window.VaniNative = {
         setTimeout(() => window.VaniBridge._emit('llm.done', { genId: idForDone, stopped: true, tokens: 0 }), 0);
         break;
       }
-      case 'tts.configure': ok(null); break;
+      case 'speech.status': ok({ tts: M.tts, asr: M.asr }); break;
+      case 'tts.configure': {
+        if (M.llm.omni && M.llm.state === 'ready' && args.engine !== 'system') { fail('Omni isolation is active'); break; }
+        M.tts = args.engine === 'system' ? { state: 'idle', path: '', engine: 'system' }
+          : { state: 'ready', path: args.dir || '', modelId: args.modelId || '', name: args.name || '', engine: args.engine };
+        ok(M.tts); window.VaniBridge._emit('tts.status', M.tts); break;
+      }
+      case 'tts.unload': M.tts = { state: 'idle', path: '' }; ok(M.tts); window.VaniBridge._emit('tts.status', M.tts); break;
       case 'tts.speak': ok(null); window.VaniBridge._emit('tts.start', { utterId: args.utterId }); setTimeout(() => window.VaniBridge._emit('tts.end', { utterId: args.utterId, interrupted: false }), 40); break;
-      case 'tts.stop': case 'asr.start': case 'asr.stop': case 'asr.feed': case 'asr.pttRelease': ok(null); break;
+      case 'asr.load': {
+        if (M.llm.omni && M.llm.state === 'ready') { fail('Omni isolation is active'); break; }
+        M.asr = { state: 'ready', path: args.dir || '', modelId: args.modelId || '', name: args.name || '', engine: args.engine, capturing: false };
+        ok(M.asr); window.VaniBridge._emit('asr.status', M.asr); break;
+      }
+      case 'asr.unload': M.asr = { state: 'idle', path: '', capturing: false }; ok(M.asr); window.VaniBridge._emit('asr.status', M.asr); break;
+      case 'asr.start': {
+        if (M.llm.omni && M.llm.state === 'ready' && args.engine !== 'system') { fail('Omni isolation is active'); break; }
+        if (args.engine !== 'system') {
+          M.asr = { state: 'ready', path: args.dir || '', modelId: args.modelId || '', name: args.name || '', engine: args.engine, capturing: true };
+          window.VaniBridge._emit('asr.status', M.asr);
+        }
+        ok(M.asr); break;
+      }
+      case 'asr.stop': M.asr = { ...M.asr, capturing: false }; ok(null); window.VaniBridge._emit('asr.status', M.asr); break;
+      case 'tts.stop': case 'asr.feed': case 'asr.pttRelease': ok(null); break;
       case 'models.delete': { M.models = M.models.filter(m => m.id !== args.id); ok(null); setTimeout(() => window.VaniBridge._emit('models.changed', {}), 0); break; }
       case 'models.import': ok(null); break;
       case 'models.lastActive': ok({ path: M.lastActive || '' }); break;
@@ -484,7 +522,7 @@ async function main() {
       check(await page.evaluate(() => /Downloaded \/ Installed/.test(document.querySelector('.installed-section').textContent)), 'section titled "Downloaded / Installed"');
       await page.click('#hub-seg button[data-tab="main"]'); await sleep(150);
       check(await page.evaluate(() => !!document.querySelector('[data-model="lfm25-350m"]') && !!document.querySelector('[data-model="lfm25-12b"]')), 'LFM2.5-350M + 1.2B first-class main cards present');
-      check(await page.evaluate(() => { const r = [...document.querySelectorAll('.installed-row')].find(x => /LFM2\.5/.test(x.textContent)); return r && /Use|Active/.test(r.textContent); }), 'installed LLM row exposes Use/Active');
+      check(await page.evaluate(() => { const r = [...document.querySelectorAll('.installed-row')].find(x => /LFM2\.5/.test(x.textContent)); return r && /Load Model|Unload/.test(r.textContent) && /On disk|In RAM/.test(r.textContent); }), 'installed LLM row separates disk residency from RAM load state');
       // supplementary segment
       await page.click('#hub-seg button[data-tab="supp"]');
       await page.waitForFunction(() => document.querySelectorAll('#screen-models .model-card').length >= 11, null, { timeout: 4000 });
@@ -517,6 +555,50 @@ async function main() {
       await page.evaluate(() => window.VaniBridge._emit('modal.close', {}));
       await page.waitForFunction(() => document.querySelector('#modal-root').hidden, null, { timeout: 3000 });
       check(await responsive(), 'Models hub responsive after persistence checks');
+    });
+
+    await step('v1.5.0: real RAM state, explicit unloads and Omni isolation', async () => {
+      await page.click('#tabbar .tab[data-tab="models"]');
+      await page.click('#hub-seg button[data-tab="main"]');
+      await page.evaluate(() => window.__mockInstall({ id: 'inst-omni', modelId: 'lfm3-omni-2b', name: 'LFM3-Omni-2B (Q4_K_M)', kind: 'llm', quant: 'Q4_K_M', path: '/models/LFM3-Omni-2B.gguf', dir: false, sizeBytes: 1099630080, engine: 'llm' }));
+      await page.waitForFunction(() => !!document.querySelector('[data-action-slot="lfm3-omni-2b:Q4_K_M"] [data-action="load"]'), null, { timeout: 4000 });
+
+      await page.click('[data-action-slot="lfm25-350m:Q4_K_M"] [data-action="load"]');
+      await page.waitForFunction(() => window.__vaniMock.llm.modelPath === '/models/lfm25.gguf', null, { timeout: 4000 });
+      check(true, 'one Main LLM reaches native ready state');
+
+      await page.click('#tabbar .tab[data-tab="models"]');
+      await page.click('#hub-seg button[data-tab="supp"]');
+      await page.click('.model-card[data-model="phonon"] [data-supp-action] [data-action="load"]');
+      await page.waitForFunction(() => window.__vaniMock.tts.state === 'ready' && window.__vaniMock.tts.path === '/models/phonon', null, { timeout: 4000 });
+      await page.click('.model-card[data-model="whisper-tiny"] [data-supp-action] [data-action="load"]');
+      await page.waitForFunction(() => window.__vaniMock.asr.state === 'ready' && window.__vaniMock.asr.path === '/models/whisper-tiny', null, { timeout: 4000 });
+      check(await page.evaluate(() => window.__vaniMock.llm.state === 'ready' && window.__vaniMock.tts.state === 'ready' && window.__vaniMock.asr.state === 'ready'), 'one LLM + one standalone TTS + one ASR coexist');
+
+      await page.click('.model-card[data-model="phonon"] [data-supp-action] [data-action="unload"]');
+      await page.waitForFunction(() => window.__vaniMock.tts.state === 'idle', null, { timeout: 4000 });
+      check(await page.evaluate(() => window.__vaniMock.models.some(m => m.id === 'inst-phonon') && !!document.querySelector('.model-card[data-model="phonon"] [data-action="load"]')), 'TTS Unload frees RAM state but retains installed files');
+
+      await page.click('.model-card[data-model="phonon"] [data-supp-action] [data-action="load"]');
+      await page.waitForFunction(() => window.__vaniMock.tts.state === 'ready', null, { timeout: 4000 });
+      await page.click('#tabbar .tab[data-tab="models"]');
+      await page.click('#hub-seg button[data-tab="main"]');
+      await page.click('[data-action-slot="lfm3-omni-2b:Q4_K_M"] [data-action="load"]');
+      await page.waitForFunction(() => window.__vaniMock.llm.omni === true, null, { timeout: 4000 });
+      check(await page.evaluate(() => window.__vaniMock.tts.state === 'idle' && window.__vaniMock.asr.state === 'idle'), 'Omni purges all standalone speech allocations before becoming ready');
+      check(await page.evaluate(() => ['inst-phonon', 'inst-whisper', 'inst-llm'].every(id => window.__vaniMock.models.some(m => m.id === id))), 'Omni isolation does not delete previous model files');
+
+      await page.click('#tabbar .tab[data-tab="models"]');
+      check(await page.evaluate(() => document.querySelector('[data-action-slot="lfm25-350m:Q4_K_M"] button')?.disabled), 'competing Main LLM load is blocked while Omni is active');
+      await page.click('.installed-row[data-model="lfm3-omni-2b"] [data-action="unload"]');
+      await page.waitForFunction(() => window.__vaniMock.llm.state === 'idle', null, { timeout: 4000 });
+      check(await page.evaluate(() => window.__vaniMock.models.some(m => m.id === 'inst-omni') && !!document.querySelector('[data-action-slot="lfm3-omni-2b:Q4_K_M"] [data-action="load"]')), 'Omni Unload restores Load Model and retains the GGUF');
+
+      await page.click('#hub-seg button[data-tab="supp"]');
+      const speaksBefore = await page.evaluate(() => window.__vaniMock.calls.filter(x => x === 'tts.speak').length);
+      await page.click('[data-voice-preview="phonon"]');
+      await page.waitForFunction(n => window.__vaniMock.calls.filter(x => x === 'tts.speak').length > n, speaksBefore, { timeout: 4000 });
+      check(true, 'Preview Voice still plays after Omni and explicit unload cycles');
     });
 
     await step('Final integrity', async () => {

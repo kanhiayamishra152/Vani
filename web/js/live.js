@@ -395,13 +395,15 @@ function feedSpeech(content) {
   sentenceBuf = content.slice(spokenConsumed);
   let m;
   const re = /[.!?।,]\s+|\n+/g;
-  let lastCut = 0;
-  while ((m = re.exec(sentenceBuf))) lastCut = m.index + 1;
+  let lastCut = 0, clauseStart = 0;
+  while ((m = re.exec(sentenceBuf))) {
+    lastCut = m.index + m[0].length;
+    enqueueSpeech(sentenceBuf.slice(clauseStart, lastCut));
+    clauseStart = lastCut;
+  }
   if (lastCut > 0) {
-    const part = sentenceBuf.slice(0, lastCut);
     spokenConsumed += lastCut;
     sentenceBuf = sentenceBuf.slice(lastCut);
-    enqueueSpeech(part);
   }
 }
 

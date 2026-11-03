@@ -214,14 +214,17 @@ function feedAutoSpeech(content, flush = false) {
   const text = String(content || '');
   if (text.length < autoSpeech.consumed) autoSpeech.consumed = 0;
   const rest = text.slice(autoSpeech.consumed);
-  let cut = 0; let match;
+  let cut = 0, clauseStart = 0; let match;
   const re = /[.!?।,]\s+|\n+/g;
-  while ((match = re.exec(rest))) cut = match.index + match[0].length;
-  if (cut > 0) {
-    const part = speechText(rest.slice(0, cut));
-    autoSpeech.consumed += cut;
+  while ((match = re.exec(rest))) {
+    cut = match.index + match[0].length;
+    // Queue each completed clause independently; do not coalesce a whole
+    // multi-sentence token burst into one delayed synthesis request.
+    const part = speechText(rest.slice(clauseStart, cut));
     if (part) autoSpeech.queue.push(part);
+    clauseStart = cut;
   }
+  if (cut > 0) autoSpeech.consumed += cut;
   if (flush) {
     const tail = speechText(text.slice(autoSpeech.consumed));
     autoSpeech.consumed = text.length;
@@ -511,7 +514,7 @@ function renderDrawer() {
     <div class="drawer-foot">
       <button class="drawer-foot-item" id="drawer-prompts">${icon('sparkles')}<span>System Prompt Studio</span></button>
       <button class="drawer-foot-item" id="drawer-models">${icon('box')}<span>Model Hub</span></button>
-      <div class="drawer-version">Vani AI v1.4.0 · on-device</div>
+      <div class="drawer-version">Vani AI v1.5.0 · on-device</div>
     </div>`;
   $('#drawer-new').addEventListener('click', () => { store.newThread(); closeDrawer(); renderChat(); });
   $('#drawer-prompts').addEventListener('click', () => { closeDrawer(); openPromptStudio(); });
