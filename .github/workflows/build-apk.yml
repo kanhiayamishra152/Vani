@@ -202,6 +202,22 @@ jobs:
         continue-on-error: true
         run: bash scripts/upload-gofile.sh dist/vani-ai-1.0.0-release.apk dist/vani-ai-1.0.0-source.zip
 
+      - name: Clear existing release assets (idempotent re-publish)
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_release)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          ID=$(gh api "repos/$REPO/releases/tags/v1.0.0" --jq '.id' 2>/dev/null) || ID=""
+          if [ -n "$ID" ]; then
+            for AID in $(gh api "repos/$REPO/releases/$ID/assets" --jq '.[].id'); do
+              gh api -X DELETE "repos/$REPO/releases/assets/$AID" >/dev/null 2>&1 && echo "removed old asset $AID" || true
+            done
+          else
+            echo "no existing v1.0.0 release"
+          fi
+
       - name: Publish GitHub Release v1.0.0
         if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_release)
         uses: softprops/action-gh-release@v2
@@ -210,6 +226,7 @@ jobs:
           name: Vani AI v1.0.0
           make_latest: "true"
           generate_release_notes: false
+          overwrite_files: true
           files: |
             dist/vani-ai-1.0.0-release.apk
             dist/vani-ai-1.0.0-source.zip
