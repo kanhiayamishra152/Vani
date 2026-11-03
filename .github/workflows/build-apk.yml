@@ -43,16 +43,32 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install SDK / NDK / CMake components
+      - name: Install SDK / NDK / CMake components (pre-installed runner SDK)
         run: |
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager "platforms;android-${ANDROID_PLATFORM}" \
-                     "build-tools;${ANDROID_BUILD_TOOLS}" \
-                     "ndk;${ANDROID_NDK}" \
-                     "cmake;${ANDROID_CMAKE}"
+          # ubuntu-latest ships an Android SDK; use it directly instead of a
+          # third-party setup action. Add the pinned NDK + CMake + platform.
+          export ANDROID_HOME="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          SDKMANAGER="$(command -v sdkmanager || true)"
+          if [ -z "$SDKMANAGER" ]; then
+            for d in "$ANDROID_HOME/cmdline-tools/latest/bin" "$ANDROID_HOME/cmdline-tools/bin" "$ANDROID_HOME/tools/bin"; do
+              if [ -x "$d/sdkmanager" ]; then SDKMANAGER="$d/sdkmanager"; break; fi
+            done
+          fi
+          if [ -z "$SDKMANAGER" ]; then
+            echo "sdkmanager not found; installing command-line tools"
+            mkdir -p "$ANDROID_HOME/cmdline-tools"
+            curl -fsSL https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -o /tmp/clt.zip
+            unzip -q /tmp/clt.zip -d "$ANDROID_HOME/cmdline-tools"
+            mv "$ANDROID_HOME/cmdline-tools/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"
+            SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          fi
+          echo "Using sdkmanager: $SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" "platforms;android-${ANDROID_PLATFORM}" \
+                        "build-tools;${ANDROID_BUILD_TOOLS}" \
+                        "ndk;${ANDROID_NDK}" \
+                        "cmake;${ANDROID_CMAKE}"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
