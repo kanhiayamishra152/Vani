@@ -14,6 +14,7 @@ on:
 
 permissions:
   contents: write
+  issues: write
 
 env:
   NODE_VERSION: "20"
@@ -115,7 +116,33 @@ jobs:
 
       - name: Assemble release APK
         working-directory: android
-        run: gradle --no-daemon assembleRelease
+        shell: bash
+        run: |
+          set -o pipefail
+          gradle --no-daemon --stacktrace assembleRelease 2>&1 | tee /tmp/gradle.log
+
+      - name: Report build error (diagnostic)
+        if: failure()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          if [ -f /tmp/gradle.log ]; then
+            {
+              echo "## Gradle failure (run ${{ github.run_id }})";
+              echo '```';
+              grep -nE "error:|e: |FAILED|What went wrong|Caused by|Execution failed|> Task|CMake Error|ninja:|undefined reference|fatal error" /tmp/gradle.log | tail -n 120;
+              echo "----- tail -----";
+              tail -n 80 /tmp/gradle.log;
+              echo '```';
+            } > /tmp/diag.md
+          else
+            echo "No gradle.log captured (failure before assemble)." > /tmp/diag.md
+          fi
+          BODY=$(python3 -c "import json,sys; print(json.dumps({'title':'CI build diagnostic','body':open('/tmp/diag.md').read()[:60000]}))")
+          curl -fsSL -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$REPO/issues" -d "$BODY" >/dev/null && echo "diagnostic issue posted" || echo "issue post failed"
 
       - name: Align + verify APK
         run: |
