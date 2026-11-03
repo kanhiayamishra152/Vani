@@ -105,7 +105,9 @@ public class DownloadService extends Service {
             if (ACTION_START.equals(action)) {
                 JSONObject e = new JSONObject(intent.getStringExtra("entry"));
                 String id = e.getString("id");
-                File part = new File(Models.modelsDir(this), e.getString("fileName") + ".part");
+                String cleanFileName = SafeFilename.clean(e.getString("fileName"));
+                e.put("fileName", cleanFileName);
+                File part = SafeFilename.safeChild(Models.modelsDir(this), cleanFileName + ".part");
                 e.put("received", part.exists() ? part.length() : 0);
                 e.put("state", "queued");
                 e.put("speed", 0);
@@ -132,7 +134,7 @@ public class DownloadService extends Service {
                 String id = intent.getStringExtra("id");
                 liveState.put(id, "cancelled");
                 JSONObject e = liveMeta.get(id);
-                if (e != null) new File(Models.modelsDir(this), e.optString("fileName") + ".part").delete();
+                if (e != null) SafeFilename.safeChild(Models.modelsDir(this), e.optString("fileName") + ".part").delete();
                 liveMeta.remove(id);
                 Downloads.remove(this, id);
                 getSystemService(NotificationManager.class).cancel(notifId(id));
@@ -223,13 +225,31 @@ public class DownloadService extends Service {
         long offset = part.exists() ? part.length() : 0;
         if (expected > 0 && offset > expected) { part.delete(); offset = 0; }
 
-        HttpURLConnection con = (HttpURLConnection) new URL(url).openConnection();
-        con.setConnectTimeout(30000);
-        con.setReadTimeout(30000);
-        con.setInstanceFollowRedirects(true);
-        con.setRequestProperty("User-Agent", "VaniAI/1.2.0 (Android)");
-        if (offset > 0) con.setRequestProperty("Range", "bytes=" + offset + "-");
-        int code = con.getResponseCode();
+        // v1.3.0 security: HTTPS-only + strict host allowlist, with EVERY redirect
+        // hop re-validated so a malicious URL can never bounce to an evil host.
+        if (!SafeFilename.isAllowedUrl(url)) throw new IOException("Blocked download URL (HTTPS + allowlist only)");
+        String current = url;
+        HttpURLConnection con = null;
+        int code = 0;
+        for (int hop = 0; hop < 6; hop++) {
+            con = (HttpURLConnection) new URL(current).openConnection();
+            con.setConnectTimeout(30000);
+            con.setReadTimeout(30000);
+            con.setInstanceFollowRedirects(false);
+            con.setRequestProperty("User-Agent", "VaniAI/1.3.0 (Android)");
+            if (offset > 0) con.setRequestProperty("Range", "bytes=" + offset + "-");
+            code = con.getResponseCode();
+            if (code == 301 || code == 302 || code == 303 || code == 307 || code == 308) {
+                String loc = con.getHeaderField("Location");
+                con.disconnect();
+                if (loc == null) throw new IOException("redirect without Location");
+                String next = new URL(new URL(current), loc).toString();
+                if (!SafeFilename.isAllowedUrl(next)) throw new IOException("Blocked redirect to disallowed host");
+                current = next;
+                continue;
+            }
+            break;
+        }
         boolean append = code == 206;
         if (code == 200 && offset > 0) { offset = 0; append = false; }
         if (code != 200 && code != 206) throw new IOException("HTTP " + code);
@@ -300,7 +320,7 @@ public class DownloadService extends Service {
         try {
             if (files != null && files.length() > 0) {
                 // Multi-file standalone model (no archive extraction).
-                File targetDir = new File(modelsDir, sanitize(e.optString("modelId", id)));
+                File targetDir = SafeFilename.safeChild(modelsDir, sanitize(e.optString("modelId", id)));
                 targetDir.mkdirs();
                 long totalAll = 0;
                 for (int i = 0; i < files.length(); i++) totalAll += files.getJSONObject(i).optLong("bytes", 0);
@@ -309,7 +329,7 @@ public class DownloadService extends Service {
                 long receivedAll = 0;
                 for (int i = 0; i < files.length(); i++) {
                     JSONObject f = files.getJSONObject(i);
-                    File dest = new File(targetDir, f.getString("name"));
+                    File dest = SafeFilename.safeChild(targetDir, f.getString("name"));
                     receivedAll += downloadOne(e, f.getString("url"), dest, f.optLong("bytes", 0), receivedAll, totalAll);
                 }
                 path = targetDir.getAbsolutePath();
@@ -317,7 +337,7 @@ public class DownloadService extends Service {
                 size = Models.treeSize(targetDir);
             } else {
                 String fileName = e.getString("fileName");
-                File fin = new File(modelsDir, fileName);
+                File fin = SafeFilename.safeChild(modelsDir, fileName);
                 long total = e.optLong("total", 0);
                 boolean haveComplete = fin.exists() && (total <= 0 || fin.length() >= total);
                 if (!haveComplete) {
@@ -375,6 +395,7 @@ public class DownloadService extends Service {
         switch (modelId) {
             case "phonon":
             case "piper-lessac": return "vits";
+            case "phonon-ultra": return "kokoro";
             case "pocket-tts": return "pocket";
             case "kokoro": return "kokoro";
             case "whisper-tiny":
@@ -407,6 +428,9 @@ public class DownloadService extends Service {
                     topDir = slash > 0 ? name.substring(0, slash) : name;
                 }
                 File out = new File(destRoot, name);
+                // v1.3.0: canonical-path guard — archive entries can never escape
+                // the models sandbox (zip-slip / tar-slip protection).
+                if (!out.getCanonicalPath().startsWith(destRoot.getCanonicalPath() + File.separator)) continue;
                 if (entry.isDirectory()) { out.mkdirs(); continue; }
                 out.getParentFile().mkdirs();
                 try (FileOutputStream fos = new FileOutputStream(out)) {
@@ -422,7 +446,11 @@ public class DownloadService extends Service {
                 }
             }
         }
-        File dir = topDir != null ? new File(destRoot, topDir) : destRoot;
+        File dir = topDir != null ? SafeFilename.safeChild(destRoot, topDir) : destRoot;
+        if (!dir.getCanonicalPath().equals(destRoot.getCanonicalPath())
+                && !dir.getCanonicalPath().startsWith(destRoot.getCanonicalPath() + File.separator)) {
+            throw new IOException("archive top-level path escaped model sandbox");
+        }
         if (!dir.exists()) dir.mkdirs();
         return dir;
     }

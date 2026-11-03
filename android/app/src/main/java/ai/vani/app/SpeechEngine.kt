@@ -22,6 +22,7 @@ import com.k2fsa.sherpa.onnx.OfflineRecognizer
 import com.k2fsa.sherpa.onnx.OfflineRecognizerConfig
 import com.k2fsa.sherpa.onnx.OfflineTts
 import com.k2fsa.sherpa.onnx.OfflineTtsConfig
+import com.k2fsa.sherpa.onnx.OfflineTtsKittenModelConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsKokoroModelConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsModelConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsPocketModelConfig
@@ -57,6 +58,7 @@ class SpeechEngine(
 
     // ---- TTS state ----
     private var ttsEngine = "phonon"
+    private var ttsParadee = false
     private var tts: OfflineTts? = null
     private var systemTts: TextToSpeech? = null
     private var systemTtsReady = false
@@ -84,6 +86,7 @@ class SpeechEngine(
     private var asrEngine = "system"
     private var wasSpeech = false
     private val pttBuffer = ArrayList<FloatArray>()
+    private var audioBridge: VaniAudioBridge? = null
 
     private fun ok(id: String, payload: String = "{}") = MainActivity.instance?.resolve(id, true, payload)
     private fun err(id: String, msg: String) =
@@ -98,11 +101,17 @@ class SpeechEngine(
         val dir = a.optString("dir", "")
         ttsSpeed = a.optDouble("speed", 1.0).toFloat()
         ttsSid = a.optInt("sid", 0)
+        ttsParadee = a.optBoolean("paradee", false) || engine == "paradee" ||
+            dir.contains("phonon-ultra") || dir.contains("paradee")
         exec.submit {
             try {
                 tts?.release(); tts = null
                 // "phonon" is now a real Piper VITS multi-speaker pack.
-                val normEngine = if (engine == "phonon") "vits" else engine
+                val normEngine = when (engine) {
+                    "phonon" -> "vits"
+                    "paradee" -> "kokoro"
+                    else -> engine
+                }
                 ttsEngine = normEngine
                 when (normEngine) {
                     "system" -> ensureSystemTts()
@@ -184,6 +193,19 @@ class SpeechEngine(
                         numThreads = 2,
                     )
                 }
+                "kitten" -> {
+                    // Optional legacy Kitten pack support. Phonon-UltraLight
+                    // itself uses the Kokoro-compatible Paradee branch above.
+                    val model = pick(dir, "model", preferInt8 = true).ifEmpty { pick(dir, ".onnx") }
+                    val voices = dir.walkTopDown().firstOrNull { it.name == "voices.bin" }?.absolutePath ?: return null
+                    val tokens = dir.walkTopDown().firstOrNull { it.name == "tokens.txt" }?.absolutePath ?: return null
+                    val lexicon = dir.walkTopDown().firstOrNull { it.name.startsWith("lexicon") && it.name.endsWith(".txt") }?.absolutePath ?: ""
+                    if (model.isEmpty()) return null
+                    OfflineTtsModelConfig(
+                        kitten = OfflineTtsKittenModelConfig(model = model, voices = voices, tokens = tokens, lexicon = lexicon),
+                        numThreads = 2,
+                    )
+                }
                 "pocket" -> {
                     val lmFlow = pick(dir, "flow")
                     val lmMain = pick(dir, "main")
@@ -236,18 +258,29 @@ class SpeechEngine(
                         .build()
                     audioTrack = track
                     track.play()
-                    neural.generateWithCallback(text = text, sid = sid, speed = ttsSpeed) { samples ->
-                        if (ttsStop) { interrupted = true; return@generateWithCallback 0 }
-                        track.write(samples, 0, samples.size, AudioTrack.WRITE_BLOCKING)
-                        var sum = 0.0
-                        for (s in samples) sum += s * s
-                        val rms = sqrt(sum / samples.size).toFloat()
-                        val now = System.currentTimeMillis()
-                        if (now - lastLevelEmit > 60) {
-                            lastLevelEmit = now
-                            emitLevel(utterId, (rms * 3.2f).coerceIn(0f, 1f))
+                    // Paradee uses the same streaming audio callback as every
+                    // other engine, but receives offline phoneme codepoints so
+                    // the <9 MiB pack needs no bundled espeak/lexicon data.
+                    fun onSamples(samples: FloatArray): Int {
+                        if (ttsStop) { interrupted = true; return 0 }
+                        track?.write(samples, 0, samples.size, AudioTrack.WRITE_BLOCKING)
+                        if (samples.isNotEmpty()) {
+                            var sum = 0.0
+                            for (s in samples) sum += s * s
+                            val rms = sqrt(sum / samples.size).toFloat()
+                            val now = System.currentTimeMillis()
+                            if (now - lastLevelEmit > 60) {
+                                lastLevelEmit = now
+                                emitLevel(utterId, (rms * 3.2f).coerceIn(0f, 1f))
+                            }
                         }
-                        1
+                        return 1
+                    }
+                    if (ttsParadee) {
+                        val config = ParadeeFrontend.config(ctx, text, sid, ttsSpeed)
+                        neural.generateWithConfigAndCallback("", config) { samples -> onSamples(samples) }
+                    } else {
+                        neural.generateWithCallback(text = text, sid = sid, speed = ttsSpeed) { samples -> onSamples(samples) }
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "neural tts", e)
@@ -402,6 +435,8 @@ class SpeechEngine(
                             numThreads = 1,
                         ),
                     )
+                    // Single native mic consumer straight into sherpa-onnx.
+                    startNativeCapture()
                 } else {
                     startSystemRecognizer(mode, language)
                 }
@@ -426,6 +461,9 @@ class SpeechEngine(
 
     private fun startSystemRecognizer(mode: String, language: String) {
         main.post {
+            // Never two mic consumers: the system recognizer owns the mic alone.
+            try { audioBridge?.stop() } catch (_: Exception) {}
+            audioBridge = null
             if (!asrActive) return@post
             if (!SpeechRecognizer.isRecognitionAvailable(ctx)) {
                 ev("asr.error", JSONObject().put("error", "No speech recognizer on this device. Install Whisper for offline ears."))
@@ -473,15 +511,10 @@ class SpeechEngine(
         try { r.startListening(intent) } catch (e: Exception) { Log.w(TAG, "system listen", e) }
     }
 
-    fun feed(pcmBase64: String) {
+    /** Native PCM path: VaniAudioBridge feeds 16 kHz mono floats directly (no
+     *  getUserMedia, no base64 JS round-trip). This is the ONLY mic consumer. */
+    fun feedSamples(samples: FloatArray) {
         if (!asrActive || !isOfflineAsr(asrEngine)) return
-        val bytes = Base64.decode(pcmBase64, Base64.DEFAULT)
-        val samples = FloatArray(bytes.size / 2)
-        for (i in samples.indices) {
-            val lo = bytes[i * 2].toInt() and 0xff
-            val hi = bytes[i * 2 + 1].toInt()
-            samples[i] = ((hi shl 8) or lo).toShort() / 32768.0f
-        }
         exec.submit {
             if (!asrActive) return@submit
             try {
@@ -506,7 +539,41 @@ class SpeechEngine(
                     decodeSegment(seg.samples)
                 }
             } catch (e: Exception) {
-                Log.w(TAG, "feed", e)
+                Log.w(TAG, "feedSamples", e)
+            }
+        }
+    }
+
+    /** Legacy base64 path (web preview / compatibility). Decodes then feeds. */
+    fun feed(pcmBase64: String) {
+        if (!asrActive || !isOfflineAsr(asrEngine)) return
+        val bytes = Base64.decode(pcmBase64, Base64.DEFAULT)
+        val samples = FloatArray(bytes.size / 2)
+        for (i in samples.indices) {
+            val lo = bytes[i * 2].toInt() and 0xff
+            val hi = bytes[i * 2 + 1].toInt()
+            samples[i] = ((hi shl 8) or lo).toShort() / 32768.0f
+        }
+        feedSamples(samples)
+    }
+
+    /** Start the single native mic consumer for offline ASR. */
+    private fun startNativeCapture() {
+        main.post {
+            try {
+                audioBridge?.stop()
+                val activity = MainActivity.instance ?: return@post
+                val ab = VaniAudioBridge(activity) { samples, len ->
+                    // Copy: the capture thread reuses its buffer; ASR runs async.
+                    feedSamples(samples.copyOf(len))
+                }
+                audioBridge = ab
+                if (!ab.start()) {
+                    ev("asr.error", JSONObject().put("error", "Microphone unavailable — grant mic permission and tap again."))
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "native capture", e)
+                ev("asr.error", JSONObject().put("error", "Could not start microphone: ${e.message}"))
             }
         }
     }
@@ -558,6 +625,8 @@ class SpeechEngine(
     }
 
     private fun releaseAsrInternal() {
+        try { audioBridge?.stop() } catch (_: Exception) {}
+        audioBridge = null
         try { vad?.release() } catch (_: Exception) {}
         vad = null
         try { recognizer?.release() } catch (_: Exception) {}

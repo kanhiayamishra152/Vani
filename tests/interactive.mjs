@@ -58,7 +58,10 @@ function serve() {
 
 /* ----------------- native bridge mock (no model installed) ----------------- */
 const MOCK = `
-window.__vaniMock = { downloads: [], models: [], calls: [] };
+window.__vaniMock = { downloads: [], models: [], calls: [], holdGeneration: false, generationTimer: null, genId: null, lastGenerate: null };
+window.__mockSetModel = (name, modelPath) => {
+  window.VaniBridge._emit('llm.status', { state: 'ready', name, modelPath, nCtx: 4096 });
+};
 window.__mockProgress = (id, received, total, speed, state) => {
   const d = window.__vaniMock.downloads.find(x => x.id === id);
   if (d) { d.received = received; d.total = total; d.speed = speed; d.state = state; }
@@ -87,10 +90,29 @@ window.VaniNative = {
       case 'downloads.pause': { const d = M.downloads.find(x => x.id === args.id); if (d) d.state = 'paused'; ok(null); setTimeout(() => window.VaniBridge._emit('download.state', { id: args.id }), 0); break; }
       case 'downloads.resume': { const d = M.downloads.find(x => x.id === args.id); if (d) d.state = 'downloading'; ok(null); setTimeout(() => window.VaniBridge._emit('download.state', { id: args.id }), 0); break; }
       case 'downloads.cancel': { M.downloads = M.downloads.filter(x => x.id !== args.id); ok(null); setTimeout(() => window.VaniBridge._emit('download.state', { id: args.id }), 0); break; }
-      case 'llm.load': ok({ state: 'ready', modelPath: '/models/mock.gguf', nCtx: 4096 }); break;
+      case 'llm.load': ok({ state: 'ready', name: args.name || 'Mock model', modelPath: args.path || '/models/mock.gguf', nCtx: 4096 }); break;
       case 'llm.unload': ok({ state: 'idle' }); break;
-      case 'llm.generate': { ok(null); const toks = ['Hello', ' from', ' Vani', '!']; let i = 0; const t = setInterval(() => { if (i < toks.length) window.VaniBridge._emit('llm.token', { token: toks[i++] }); else { clearInterval(t); window.VaniBridge._emit('llm.done', {}); } }, 25); break; }
-      case 'llm.stop': ok(null); break;
+      case 'llm.generate': {
+        M.lastGenerate = args; M.genId = args.genId; ok(null);
+        const toks = ['Hello', ' from', ' Vani', '!']; let i = 0;
+        clearInterval(M.generationTimer);
+        M.generationTimer = setInterval(() => {
+          if (M.holdGeneration) return;
+          if (i < toks.length) window.VaniBridge._emit('llm.token', { genId: args.genId, text: toks[i++] });
+          else {
+            clearInterval(M.generationTimer); M.generationTimer = null;
+            window.VaniBridge._emit('llm.done', { genId: args.genId, tokens: toks.length, tps: 32.5, ttftMs: 42 });
+          }
+        }, 25);
+        break;
+      }
+      case 'llm.stop': {
+        clearInterval(M.generationTimer); M.generationTimer = null; M.holdGeneration = false;
+        ok(null);
+        const idForDone = args.genId || M.genId;
+        setTimeout(() => window.VaniBridge._emit('llm.done', { genId: idForDone, stopped: true, tokens: 0 }), 0);
+        break;
+      }
       case 'tts.configure': ok(null); break;
       case 'tts.speak': ok(null); setTimeout(() => window.VaniBridge._emit('tts.end', {}), 40); break;
       case 'tts.stop': case 'asr.start': case 'asr.stop': case 'asr.feed': case 'asr.pttRelease': ok(null); break;
@@ -183,6 +205,27 @@ async function main() {
       check(await page.evaluate(() => !!document.querySelector('#live-close')), 'red X close button present');
       await sleep(400); // let walk-in / fallback settle
       check(await responsive(), 'responsive while Live open');
+      // A real VRM can take longer than the fallback panel to initialize. Wait
+      // for the native ASR bridge, not an arbitrary avatar-load duration, before
+      // injecting the transcript that drives the answer-card checks.
+      await page.waitForFunction(() => window.__vaniMock.calls.includes('asr.start'), null, { timeout: 15000 });
+      // v1.3.0 floating answer -> reader, history sheet, and keyboard dock.
+      await page.evaluate(() => window.VaniBridge._emit('asr.final', { text: 'Hello Live' }));
+      await page.waitForFunction(() => !document.querySelector('#live-answer').hidden, null, { timeout: 5000 });
+      check(await page.evaluate(() => !!document.querySelector('#live-answer-text')?.textContent), 'Live floating answer card updates in real time');
+      await page.click('#live-answer');
+      check(await page.evaluate(() => !document.querySelector('#live-reader').hidden && !!document.querySelector('#live-reader-body')), 'tap-to-expand opens the scrollable answer reader');
+      await page.click('#live-reader-back');
+      await page.click('#live-history-open');
+      check(await page.evaluate(() => !document.querySelector('#live-history.live-history').hidden), 'Chat History opens without leaving Live');
+      check(await page.evaluate(() => document.querySelectorAll('#live-history-body .live-history-msg').length >= 2), 'Live history contains the current transcript');
+      await page.click('#live-history-close');
+      await page.click('#live-keyboard-toggle');
+      check(await page.evaluate(() => !document.querySelector('#live-keyboard').hidden && !!document.querySelector('#live-kb-input')), 'Keyboard dock opens inside Live');
+      await page.fill('#live-kb-input', '/anime wave');
+      await page.click('#live-kb-send');
+      await page.click('#live-keyboard-toggle');
+      check(await responsive(), 'Live reader/history/keyboard remain responsive');
       // open command sheet and fire all 12 /anime actions
       await page.click('#live-cmds');
       await page.waitForFunction(() => !document.querySelector('#sheet-root').hidden, null, { timeout: 4000 });
@@ -320,6 +363,40 @@ async function main() {
       check(await responsive(), 'New Chat responds on first tap');
     });
 
+    await step('v1.3.0: per-model thinking triangle + Send becomes Stop', async () => {
+      await page.click('#tabbar .tab[data-tab="chat"]'); await sleep(120);
+      await page.evaluate(() => window.__mockSetModel('Model A', '/models/a.gguf')); await sleep(80);
+      check(await page.evaluate(() => !!document.querySelector('#btn-think .think-tri svg')), 'chat composer has a thinking triangle control');
+      check(await page.getAttribute('#btn-think', 'aria-pressed') === 'true', 'thinking defaults ON for a newly seen model');
+      await page.click('#btn-think'); await sleep(50);
+      check(await page.getAttribute('#btn-think', 'aria-pressed') === 'false', 'triangle turns thinking OFF for Model A');
+      check(await page.evaluate(() => JSON.parse(localStorage.getItem('vani.v1.modelThinking'))['Model A'] === false), 'Model A preference is persisted per model');
+
+      await page.evaluate(() => window.__mockSetModel('Model B', '/models/b.gguf')); await sleep(80);
+      check(await page.getAttribute('#btn-think', 'aria-pressed') === 'true', 'Model B has its own default ON state');
+      await page.click('#btn-think'); await sleep(50);
+      await page.evaluate(() => window.__mockSetModel('Model A', '/models/a.gguf')); await sleep(80);
+      check(await page.getAttribute('#btn-think', 'aria-pressed') === 'false', 'switching back restores Model A OFF (not a global toggle)');
+      await page.click('#btn-think'); await sleep(50); // Model A ON again
+      await page.evaluate(() => window.__mockSetModel('Model B', '/models/b.gguf')); await sleep(80);
+      check(await page.getAttribute('#btn-think', 'aria-pressed') === 'false', 'Model B remains OFF independently');
+
+      // Hold native generation open so the transition is observable.
+      await page.evaluate(() => { window.__vaniMock.holdGeneration = true; });
+      await page.fill('#composer-input', 'Check the stop button');
+      await page.dispatchEvent('#composer-input', 'input');
+      await page.click('#btn-send'); await sleep(100);
+      check(await page.evaluate(() => window.__vaniMock.lastGenerate?.params?.enableThinking === false), 'generation receives enableThinking=false for Model B');
+      check(await page.evaluate(() => /Respond directly with the final answer/.test(window.__vaniMock.lastGenerate?.messages?.[0]?.content || '')), 'thinking OFF also adds the direct-answer instruction');
+      check(await page.evaluate(() => !document.querySelector('#btn-stop').hidden && document.querySelector('#btn-send').hidden), 'Send converts to Stop while AI is generating');
+      await page.click('#btn-stop');
+      await page.waitForFunction(() => document.querySelector('#btn-stop').hidden, null, { timeout: 3000 });
+      check(await page.evaluate(() => window.__vaniMock.calls.includes('llm.stop')), 'Stop calls the native llm.stop bridge');
+      await page.fill('#composer-input', 'Ready again'); await page.dispatchEvent('#composer-input', 'input');
+      check(await page.evaluate(() => !document.querySelector('#btn-send').hidden && document.querySelector('#btn-stop').hidden), 'Stop returns to Send after generation ends');
+      await page.evaluate(() => { window.__vaniMock.holdGeneration = false; });
+    });
+
     await step('v1.2.0: Live singleton re-open (no black screen) + /anime keeps chat clean', async () => {
       await page.click('#tabbar .tab[data-tab="chat"]'); await sleep(120);
       await page.click('#btn-live');
@@ -351,6 +428,7 @@ async function main() {
       await page.evaluate(() => {
         window.__mockInstall({ id: 'inst-llm', modelId: 'lfm25-350m', name: 'LFM2.5-350M (Q4_K_M)', kind: 'llm', quant: 'Q4_K_M', path: '/models/lfm25.gguf', dir: false, sizeBytes: 229312224, engine: 'llm' });
         window.__mockInstall({ id: 'inst-phonon', modelId: 'phonon', name: 'Phonon Voice Pack (INT8)', kind: 'tts', quant: 'INT8', path: '/models/phonon', dir: true, sizeBytes: 23366127, engine: 'vits' });
+        window.__mockInstall({ id: 'inst-ultra', modelId: 'phonon-ultra', name: 'Phonon Ultra-Light 8M (INT8)', kind: 'tts', quant: 'INT8', path: '/models/phonon-ultralight-8m-int8', dir: true, sizeBytes: 8000000, engine: 'kokoro' });
         window.__mockInstall({ id: 'inst-whisper', modelId: 'whisper-tiny', name: 'Whisper Tiny (INT8)', kind: 'asr', quant: 'INT8', path: '/models/whisper-tiny', dir: true, sizeBytes: 103609903, engine: 'whisper' });
       });
       await page.waitForFunction(() => !!document.querySelector('.installed-section'), null, { timeout: 4000 });
@@ -374,6 +452,13 @@ async function main() {
       check(sid === 92, 'choosing a voice persists ttsSid=92 (Orion/Aarav)');
       await page.click('[data-voice-preview="phonon"]'); await sleep(150);
       check(await responsive(), 'Preview Voice click is responsive');
+      await page.waitForFunction(() => !!document.querySelector('[data-voice-sel="phonon-ultra"]'), null, { timeout: 4000 });
+      const ultraOpts = await page.evaluate(() => [...document.querySelectorAll('[data-voice-sel="phonon-ultra"] option')].map(o => o.value));
+      check(ultraOpts.join(',') === '0,1,2,3', `Ultra-Light card exposes four Paradee voices (${ultraOpts.join(',')})`);
+      await page.selectOption('[data-voice-sel="phonon-ultra"]', '2'); await sleep(60);
+      check(await page.evaluate(() => JSON.parse(localStorage.getItem('vani.v1.settings')).ttsSid === 2), 'Ultra-Light Aarav/Orion selects sid=2');
+      await page.click('[data-voice-preview="phonon-ultra"]'); await sleep(120);
+      check(await page.evaluate(() => window.__vaniMock.calls.includes('tts.speak')), 'Ultra-Light Preview Voice invokes native TTS');
       const titles = await page.evaluate(() => [...document.querySelectorAll('#screen-models .model-card .model-title')].map(n => n.textContent));
       for (const want of ['Whisper Tiny', 'Whisper Base', 'Whisper Small', 'Moonshine Tiny', 'Moonshine Base', 'SenseVoice', 'Zipformer']) {
         check(titles.some(t => t.includes(want)), `ASR engine present: ${want}`);

@@ -50,14 +50,18 @@ public class MainActivity extends Activity {
     Bridge bridge;
     LlmEngine llm;
     SpeechEngine speech;
+    CrashGuard crashGuard;
     final Handler main = new Handler(Looper.getMainLooper());
     final ExecutorService io = Executors.newCachedThreadPool();
 
     private volatile boolean jsHandlesBack = false;
+    volatile String pageOrigin = ASSET_ORIGIN;
     private PermissionRequest pendingPerm;
+    private String pendingMicCb;
     private static final int REQ_PERM = 201;
     private static final int REQ_NOTIF = 202;
     private static final int REQ_IMPORT = 203;
+    private static final int REQ_MIC = 204;
 
     @SuppressLint("SetJavaScriptEnabled")
     @Override
@@ -67,6 +71,10 @@ public class MainActivity extends Activity {
         llm = new LlmEngine(this);
         speech = new SpeechEngine(this, (event, payload) -> { emit(event, payload); return kotlin.Unit.INSTANCE; });
         bridge = new Bridge(this);
+        // v1.3.0 anti-freeze watchdog + fatal-crash native cleanup.
+        crashGuard = new CrashGuard(this);
+        crashGuard.installUncaughtHandler();
+        crashGuard.start();
 
         web = new WebView(this);
         setContentView(web);
@@ -77,6 +85,10 @@ public class MainActivity extends Activity {
         s.setMediaPlaybackRequiresUserGesture(false);
         s.setAllowFileAccess(false);
         s.setAllowContentAccess(false);
+        // v1.3.0 security: assets are served ONLY via WebViewAssetLoader over
+        // https://appassets.androidplatform.net — never from file:// URLs.
+        s.setAllowFileAccessFromFileURLs(false);
+        s.setAllowUniversalAccessFromFileURLs(false);
         s.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
         s.setSupportZoom(false);
         s.setCacheMode(WebSettings.LOAD_DEFAULT);
@@ -90,6 +102,13 @@ public class MainActivity extends Activity {
                 .build();
 
         web.setWebViewClient(new WebViewClient() {
+            @Override
+            public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
+                try {
+                    Uri u = Uri.parse(url);
+                    pageOrigin = u.getScheme() + "://" + u.getHost();
+                } catch (Exception ignored) { pageOrigin = ""; }
+            }
             @Override
             public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
                 return loader.shouldInterceptRequest(request.getUrl());
@@ -140,6 +159,24 @@ public class MainActivity extends Activity {
             else pendingPerm.deny();
             pendingPerm = null;
         }
+        if (requestCode == REQ_MIC && pendingMicCb != null) {
+            boolean granted = grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED;
+            try { resolve(pendingMicCb, true, new JSONObject().put("granted", granted).toString()); }
+            catch (Exception e) { resolve(pendingMicCb, true, "{\"granted\":" + granted + "}"); }
+            pendingMicCb = null;
+        }
+    }
+
+    /** v1.3.0 unified mic permission: check RECORD_AUDIO, request if needed,
+     *  resolve {granted} so JS can start the native AudioRecord bridge. */
+    void ensureMicPermission(String id) {
+        if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            try { resolve(id, true, new JSONObject().put("granted", true).toString()); }
+            catch (Exception e) { resolve(id, true, "{\"granted\":true}"); }
+            return;
+        }
+        pendingMicCb = id;
+        requestPermissions(new String[]{android.Manifest.permission.RECORD_AUDIO}, REQ_MIC);
     }
 
     void requestNotifPermission() {
@@ -286,6 +323,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         instance = null;
+        try { if (crashGuard != null) crashGuard.stop(); } catch (Exception ignored) {}
         try { speech.release(); } catch (Exception ignored) {}
         try { llm.shutdown(); } catch (Exception ignored) {}
         try { if (web != null) web.destroy(); } catch (Exception ignored) {}

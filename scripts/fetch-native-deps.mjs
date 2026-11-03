@@ -4,6 +4,7 @@
  *  - llama.cpp v0.8.0 source (GGUF inference engine, built via NDK/CMake)
  *  - sherpa-onnx 2.0.1 prebuilt Android AAR (local TTS / ASR / VAD runtime)
  *  - silero_vad.onnx (bundled voice-activity detector, ~0.6 MB)
+ *  - piper-phonemize 1.5.9 AAR (offline text frontend for Paradee)
  * All sources are pinned for reproducible builds. --optional degrades to
  * warnings for local web-only builds on restricted networks.
  */
@@ -32,6 +33,13 @@ const TARGETS = [
     kind: 'file',
     dest: join(ROOT, 'android', 'app', 'libs', `sherpa-onnx-${SHERPA_VERSION}.aar`),
     minBytes: 30_000_000,
+  },
+  {
+    name: 'piper-phonemize AAR (offline English frontend)',
+    url: 'https://github.com/csukuangfj/piper-phonemize/releases/download/v1.5.9/piper-phonemize-1.5.9.aar',
+    kind: 'file',
+    dest: join(ROOT, 'android', 'app', 'libs', 'piper-phonemize-1.5.9.aar'),
+    minBytes: 12_000_000,
   },
   {
     name: 'silero VAD model',

@@ -2,7 +2,7 @@
 import { uid, autoTitle } from './util.js';
 import { emitLocal } from './bridge.js';
 
-const K = { threads: 'vani.v1.threads', active: 'vani.v1.activeThread', prompts: 'vani.v1.prompts', activePrompt: 'vani.v1.activePrompt', settings: 'vani.v1.settings' };
+const K = { threads: 'vani.v1.threads', active: 'vani.v1.activeThread', prompts: 'vani.v1.prompts', activePrompt: 'vani.v1.activePrompt', settings: 'vani.v1.settings', modelThinking: 'vani.v1.modelThinking' };
 
 function read(key, fallback) {
   try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; } catch { return fallback; }
@@ -17,7 +17,7 @@ export const DEFAULT_SETTINGS = {
   maxTokens: 1024, temperature: 0.7, topP: 0.9, topK: 40, repeatPenalty: 1.1,
   vadSensitivity: 0.5,
   batterySaver: false, fpsTarget: 60,
-  ttsEngine: 'phonon', ttsModelId: 'phonon', ttsSpeed: 1.0, ttsSid: 107,
+  ttsEngine: 'kokoro', ttsModelId: 'phonon-ultra', ttsSpeed: 1.0, ttsSid: 0,
   asrEngine: 'auto', asrModelId: '', asrLanguage: 'en',
 };
 export const settings = { ...DEFAULT_SETTINGS, ...read(K.settings, {}) };
@@ -30,6 +30,23 @@ export function resetSettings() {
   Object.assign(settings, DEFAULT_SETTINGS);
   write(K.settings, settings);
   emitLocal('settings.changed', { key: '*', val: null });
+}
+
+/* ---------------- Per-model thinking control ----------------
+ * Each model remembers whether it should "think" (emit reasoning). The chat
+ * triangle toggle flips this for the active model; generate() reads it and the
+ * native chat template's enable_thinking flag + a system directive honor it.
+ * Defaults to ON so reasoning models think out of the box. */
+export let modelThinking = read(K.modelThinking, {});
+export function getModelThinking(key) {
+  if (!key) return true;
+  return key in modelThinking ? !!modelThinking[key] : true;
+}
+export function setModelThinking(key, on) {
+  if (!key) return;
+  modelThinking[key] = !!on;
+  write(K.modelThinking, modelThinking);
+  emitLocal('modelThinking.changed', { key, on: !!on });
 }
 
 /* ---------------- Threads ---------------- */

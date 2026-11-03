@@ -37,7 +37,8 @@ fi
 say "3/8 Avatar (OC-Lily VRM)"
 if [ "$SKIP_VRM" = 0 ]; then
   if node scripts/fetch-vrm.mjs; then
-    node scripts/optimize-vrm.mjs || true
+    node scripts/prepare-vrm-safe.mjs
+    node scripts/prepare-vrm-safe.mjs --check
   else
     echo "WARN: VRM fetch failed (network/Drive). Live Talk avatar will be absent until CI fetches it."
   fi
@@ -81,17 +82,17 @@ if [ -n "$SDK" ] && [ -n "$GRADLE" ]; then
   RAW=$(find android/app/build/outputs/apk/release -name '*.apk' | head -1)
   if [ -n "$RAW" ]; then
     if [ -n "$BT" ]; then
-      "$BT/zipalign" -f -p 4 "$RAW" "$DIST/vani-ai-1.2.0-release.apk"
-      if "$BT/apksigner" verify --print-certs "$DIST/vani-ai-1.2.0-release.apk" >/dev/null 2>&1; then
+      "$BT/zipalign" -f -p 4 "$RAW" "$DIST/vani-ai-1.3.0-release.apk"
+      if "$BT/apksigner" verify --print-certs "$DIST/vani-ai-1.3.0-release.apk" >/dev/null 2>&1; then
         echo "APK aligned + signature verified"
       else
-        cp "$RAW" "$DIST/vani-ai-1.2.0-release.apk"
+        cp "$RAW" "$DIST/vani-ai-1.3.0-release.apk"
         echo "WARN: apksigner verify failed; copied raw APK"
       fi
     else
-      cp "$RAW" "$DIST/vani-ai-1.2.0-release.apk"
+      cp "$RAW" "$DIST/vani-ai-1.3.0-release.apk"
     fi
-    APK_OUT="$DIST/vani-ai-1.2.0-release.apk"
+    APK_OUT="$DIST/vani-ai-1.3.0-release.apk"
   fi
 else
   echo "Android SDK or Gradle not found locally."
@@ -101,7 +102,7 @@ fi
 
 say "8/8 Source ZIP"
 bash scripts/make-source-zip.sh
-SRC_ZIP="$DIST/vani-ai-1.2.0-source.zip"
+SRC_ZIP="$DIST/vani-ai-1.3.0-source.zip"
 
 if [ "$NO_UPLOAD" = 0 ] && { [ -n "$APK_OUT" ] || [ -f "$SRC_ZIP" ]; }; then
   if have curl && curl -sf --max-time 8 https://api.gofile.io/servers >/dev/null 2>&1; then

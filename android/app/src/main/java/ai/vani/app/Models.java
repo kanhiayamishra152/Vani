@@ -167,7 +167,7 @@ public final class Models {
     }
 
     private static boolean isTts(String engine) {
-        return engine.equals("vits") || engine.equals("kokoro") || engine.equals("pocket");
+        return engine.equals("vits") || engine.equals("kokoro") || engine.equals("pocket") || engine.equals("kitten");
     }
 
     private static boolean containsModelFiles(File dir) {
@@ -195,6 +195,8 @@ public final class Models {
         if (n.contains("sense")) return "sensevoice";
         if (n.contains("zipformer")) return "zipformer";
         if (n.contains("kokoro")) return "kokoro";
+        if (n.contains("kitten")) return "kitten";
+        if (n.contains("phonon-ultra") || n.contains("ultralight") || n.contains("paradee")) return "kokoro";
         if (n.contains("pocket")) return "pocket";
         if (n.contains("vits") || n.contains("piper") || n.contains("vctk") || n.contains("lessac")) return "vits";
         boolean enc = false, dec = false, join = false, voices = false, flow = false;

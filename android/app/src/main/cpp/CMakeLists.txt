@@ -31,6 +31,14 @@ set(GGML_BUILD_EXAMPLES      OFF CACHE BOOL "" FORCE)
 set(GGML_CCACHE              OFF CACHE BOOL "" FORCE)
 set(MTMD_VIDEO               OFF CACHE BOOL "" FORCE)
 
+# v1.3.0 PocketPal-class CPU tuning for Snapdragon 4 Gen 2 (2x Cortex-A78 + 6x
+# Cortex-A55): ARMv8.2-A with dot-product + FP16 arithmetic, tuned for the A78
+# performance cores, aggressive inlining/unrolling and no debug assertions.
+# Applied globally so ggml/llama.cpp inherit the same instruction set.
+if(ANDROID AND ANDROID_ABI STREQUAL "arm64-v8a")
+    add_compile_options(-O3 -march=armv8.2-a+dotprod+fp16 -mtune=cortex-a78 -funroll-loops -DNDEBUG)
+endif()
+
 add_subdirectory("${LLAMA_DIR}" llama-build)
 add_subdirectory("${LLAMA_DIR}/tools/mtmd" mtmd-build)
 
@@ -39,4 +47,4 @@ target_link_libraries(vani_llama PRIVATE llama llama-common mtmd)
 if(ANDROID)
     target_link_libraries(vani_llama PRIVATE log android)
 endif()
-target_compile_options(vani_llama PRIVATE -O3 -fexceptions -frtti)
+target_compile_options(vani_llama PRIVATE -O3 -fexceptions -frtti -DNDEBUG)

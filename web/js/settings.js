@@ -3,7 +3,7 @@ import { $, $$, el, esc, fmtBytes } from './util.js';
 import { icon } from './icons.js';
 import { toast } from './toast.js';
 import { invoke, on, hasNative, emitLocal } from './bridge.js';
-import { settings, setSetting, resetSettings, clearAllThreads } from './store.js';
+import { settings, setSetting, resetSettings, clearAllThreads, getModelThinking, setModelThinking } from './store.js';
 import { openPromptStudio } from './prompts.js';
 import { llm } from './inference.js';
 import { SUPP_MODELS } from './catalog.js';
@@ -89,6 +89,21 @@ function rowSlider(title, desc, key, min, max, step, fmt) {
   return row;
 }
 
+function rowModelThinking() {
+  const key = llm.info?.name || llm.info?.modelPath || '';
+  const row = el('div', 'settings-row');
+  row.id = 'sec-model-thinking';
+  const enabled = key ? getModelThinking(key) : true;
+  row.innerHTML = `<div class="row-text"><span class="row-title">Think with this model</span><span class="row-desc">${key ? `Per-model control for ${esc(llm.info?.name || 'loaded model')}. The chat triangle changes only this model.` : 'Load a model to set its independent thinking preference.'}</span></div>
+    <label class="switch"><input type="checkbox" ${enabled ? 'checked' : ''} ${key ? '' : 'disabled'} aria-label="Think with this model"><span class="track"><span class="knob"></span></span></label>`;
+  row.querySelector('input').addEventListener('change', e => {
+    if (!key) return;
+    setModelThinking(key, e.target.checked);
+    toast(e.target.checked ? 'Thinking ON for this model' : 'Thinking OFF for this model');
+  });
+  return row;
+}
+
 function rowButton(title, desc, btnLabel, ic, fn, danger = false) {
   const row = el('div', 'settings-row');
   row.innerHTML = `<div class="row-text"><span class="row-title">${title}</span><span class="row-desc">${desc}</span></div>
@@ -140,7 +155,8 @@ export async function renderSettings() {
     rowPicker('Inference threads', 'CPU threads for token generation. 4 is ideal for Snapdragon 4 Gen 2.', `${settings.threads}`, pickThreads),
     rowToggle('Auto-select threads', 'Choose the thread count from the CPU topology. Turning off opens the picker.', 'autoThreads', on => { if (!on) pickThreads(); else { autoTune(true); renderSettings(); } }),
     rowToggle('Flash attention', 'Faster attention with lower memory use on supported models.', 'flashAttn'),
-    rowToggle('Show reasoning traces', 'Let thinking models reason, and show the trace in a collapsible card.', 'showReasoning'),
+    rowToggle('Show reasoning traces', 'Display the model\'s thinking in a collapsible card. Use the chat triangle to enable/disable thinking per model.', 'showReasoning'),
+    rowModelThinking(),
     rowPicker('Max new tokens', 'Upper bound on tokens generated per reply.', `${settings.maxTokens}`, () => pickValue('Max new tokens', MAXTOK_VALUES, settings.maxTokens, v => `${v} tokens`, v => setSetting('maxTokens', v))),
     rowSlider('Temperature', 'Higher = more creative, lower = more focused.', 'temperature', 0, 2, 0.05, v => v.toFixed(2)),
     rowSlider('Top-p', 'Nucleus sampling probability mass.', 'topP', 0.05, 1, 0.01, v => v.toFixed(2)),
@@ -158,7 +174,8 @@ export async function renderSettings() {
       emitLocal('sheet.open', {
         title: 'Live Talk voice',
         options: [
-          { label: 'Phonon Voice Pack', sub: '4 neural voices · ~22 MB', value: 'phonon' },
+          { label: 'Phonon Ultra-Light 8M', sub: '4 learned voices · < 9 MB', value: 'phonon-ultra' },
+          { label: 'Phonon Voice Pack (Studio)', sub: '4 neural voices · ~22 MB', value: 'phonon' },
           { label: 'Pocket TTS 100M', sub: 'Install from Supplementary', value: 'pocket-tts' },
           { label: 'Piper VITS Lessac', sub: 'Install from Supplementary', value: 'piper-lessac' },
           { label: 'Kokoro-82M', sub: 'Multi-voice · Hindi', value: 'kokoro' },
@@ -236,7 +253,7 @@ export async function renderSettings() {
 
   const about = $('#sec-about');
   about.innerHTML = `
-    <div class="settings-row"><div class="row-text"><span class="row-title">Vani AI</span><span class="row-desc">Version 1.2.0 (3) · ai.vani.app · build ${esc(buildInfo?.commit || 'dev')}</span></div><img src="assets/logo-mark.svg" style="width:30px;height:30px" alt=""></div>
+    <div class="settings-row"><div class="row-text"><span class="row-title">Vani AI</span><span class="row-desc">Version 1.3.0 (4) · ai.vani.app · build ${esc(buildInfo?.commit || 'dev')}</span></div><img src="assets/logo-mark.svg" style="width:30px;height:30px" alt=""></div>
     <div class="settings-row"><div class="row-text"><span class="row-title">Private by design</span><span class="row-desc">Inference, speech and chat history stay on this device. Models download only from the sources you choose.</span></div></div>
     <div class="settings-row"><div class="row-text"><span class="row-title">Open source</span><span class="row-desc">llama.cpp · sherpa-onnx · three.js · three-vrm · KaTeX</span></div><button class="btn-secondary" id="about-repo" style="padding:8px 14px;font-size:13px">${icon('link')}<span>GitHub</span></button></div>`;
   about.querySelector('#about-repo').addEventListener('click', () => {

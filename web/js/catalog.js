@@ -129,6 +129,14 @@ export const PHONON_VOICES = [
   { id: 92, label: 'Orion / Aarav', desc: 'Male — Deep & Calm' },
   { id: 82, label: 'Echo / Kabir', desc: 'Male — Crisp & Energetic' },
 ];
+// Phonon-UltraLight-8M (Paradee 1.2 INT8) — four learned voices.
+// IDs are the model's native voice order: af_heart, bf_isabella, am_puck, bm_fable.
+export const ULTRALIGHT_VOICES = [
+  { id: 0, label: 'Aria / Vani', desc: 'Female — Warm' },
+  { id: 1, label: 'Meera / Nova', desc: 'Female — Clear' },
+  { id: 2, label: 'Aarav / Orion', desc: 'Male — Calm' },
+  { id: 3, label: 'Kabir / Echo', desc: 'Male — Crisp' },
+];
 export const KOKORO_VOICES = [
   { id: 3, label: 'af_heart', desc: 'Female — Warm (US)' },
   { id: 2, label: 'af_bella', desc: 'Female — Bright (US)' },
@@ -151,8 +159,21 @@ export const POCKET_VOICES = [
 // kind:'files'   → standalone .onnx/.txt multi-file download (no extraction).
 export const SUPP_MODELS = [
   {
+    // v1.3.0 TRUE ultra-light pack: Paradee 1.2 INT8 (7.88M parameters), with
+    // four learned voices. The graph adapter is built + size-verified by CI;
+    // piper-phonemize lives in the APK, not in this < 9 MiB download.
+    id: 'phonon-ultra', cat: 'tts', kind: 'archive', engine: 'kokoro',
+    title: 'Phonon Ultra-Light 8M', repo: 'Paradee-8M v1.2 · Vani AI pack',
+    desc: 'Genuine ~8 MB ultra-light neural TTS (NOT the 28 MB pack). Four learned voices — Aria/Vani, Meera/Nova, Aarav/Orion, Kabir/Echo — with instant preview. The default Live Talk voice.',
+    badges: ['TTS', '< 9 MB', '4 Voices', 'Neural'],
+    voices: ULTRALIGHT_VOICES, defaultVoice: 0,
+    variants: { INT8: { file: 'phonon-ultralight-8m-int8.tar.bz2', size: 7374491 } },
+    defaultVariant: 'INT8',
+    url(v) { return `https://github.com/kanhiayamishra152/Vani/releases/download/phonon-ultralight-v1/${this.variants[v].file}`; },
+  },
+  {
     id: 'phonon', cat: 'tts', kind: 'archive', engine: 'vits',
-    title: 'Phonon Voice Pack', repo: 'Piper VCTK multi-speaker · k2-fsa/sherpa-onnx',
+    title: 'Phonon Voice Pack (Studio)', repo: 'Piper VCTK multi-speaker · k2-fsa/sherpa-onnx',
     desc: 'Real compact 4-voice neural TTS (Piper VCTK, int8). Warm female, expressive female, deep male and crisp male — with a voice selector and preview.',
     badges: ['TTS', '4 Voices', 'Neural'],
     voices: PHONON_VOICES, defaultVoice: 107,
