@@ -205,6 +205,10 @@ async function main() {
       check(await page.evaluate(() => !!document.querySelector('#live-close')), 'red X close button present');
       await sleep(400); // let walk-in / fallback settle
       check(await responsive(), 'responsive while Live open');
+      // A real VRM can take longer than the fallback panel to initialize. Wait
+      // for the native ASR bridge, not an arbitrary avatar-load duration, before
+      // injecting the transcript that drives the answer-card checks.
+      await page.waitForFunction(() => window.__vaniMock.calls.includes('asr.start'), null, { timeout: 15000 });
       // v1.3.0 floating answer -> reader, history sheet, and keyboard dock.
       await page.evaluate(() => window.VaniBridge._emit('asr.final', { text: 'Hello Live' }));
       await page.waitForFunction(() => !document.querySelector('#live-answer').hidden, null, { timeout: 5000 });

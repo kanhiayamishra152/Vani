@@ -163,7 +163,10 @@ jobs:
             {
               echo "## Test failure (run ${{ github.run_id }})";
               echo '```';
-              tail -n 320 /tmp/vani-tests.log;
+              echo '----- beginning -----';
+              head -n 180 /tmp/vani-tests.log;
+              echo '----- end -----';
+              tail -n 220 /tmp/vani-tests.log;
               echo '```';
             } > /tmp/diag.md
           elif [ -f /tmp/gradle.log ]; then
