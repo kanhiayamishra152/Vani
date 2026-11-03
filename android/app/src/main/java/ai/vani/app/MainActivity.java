@@ -325,7 +325,7 @@ public class MainActivity extends Activity {
         super.onTrimMemory(level);
         String severity = level >= TRIM_MEMORY_COMPLETE ? "critical" :
                 (level >= TRIM_MEMORY_RUNNING_CRITICAL ? "high" : "moderate");
-        emit("memory.pressure", "{"level":"" + severity + ""}");
+        emit("memory.pressure", "{\"level\":\"" + severity + "\"}");
     }
 
     @Override
