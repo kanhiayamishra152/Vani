@@ -86,6 +86,7 @@ public final class LlmEngine {
                     return;
                 }
                 synchronized (genLock) { handle = h; modelPath = path; modelName = a.optString("name", new java.io.File(path).getName()); }
+                Models.setLastActive(act, path);
                 JSONObject st = status();
                 act.resolve(id, true, st.toString());
                 act.emit("llm.status", st.toString());
@@ -112,7 +113,13 @@ public final class LlmEngine {
         final long h;
         synchronized (genLock) { h = handle; }
         if (h == 0 || !nativeOk) { fail(id, "No model loaded"); return; }
-        if (genThread != null && genThread.isAlive()) { fail(id, "Already generating"); return; }
+        if (genThread != null && genThread.isAlive()) {
+            // A previous generation is still winding down (or stuck): stop it and give
+            // it a brief grace period so a new utterance never dead-ends on "Already generating".
+            synchronized (genLock) { if (handle != 0) nativeStop(handle); }
+            try { genThread.join(1500); } catch (InterruptedException ignored) {}
+            if (genThread != null && genThread.isAlive()) { fail(id, "Already generating"); return; }
+        }
         String genId = a.optString("genId", "g0");
         currentGenId = genId;
         JSONArray messages = a.optJSONArray("messages");

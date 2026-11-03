@@ -54,6 +54,23 @@ export async function unloadModel() {
   applyStatus({ state: 'idle' });
 }
 
+/** Auto-reload the last active model on launch (persisted natively). */
+export async function autoRestore() {
+  if (!hasNative()) return;
+  try {
+    const st = await invoke('llm.status');
+    if (st.state === 'ready' || st.state === 'loading') return;
+    const { path } = await invoke('models.lastActive');
+    if (!path) return;
+    const list = await invoke('models.list');
+    const entry = list.find(m => m.path === path && (m.kind === 'llm' || m.kind === 'gguf'));
+    if (!entry) return;
+    const mm = list.find(m => m.modelId === entry.modelId && m.kind === 'mmproj');
+    await loadModel(entry, mm);
+    emitLocal('ui.toast', { message: 'Restored ' + (entry.name || 'last model') });
+  } catch { /* never block boot on restore */ }
+}
+
 /** Budget history so prompt + generation fits the context window. */
 export function buildContextMessages(history, systemText, reserve) {
   const budget = Math.max(512, settings.nCtx - reserve - 256);

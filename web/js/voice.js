@@ -20,29 +20,33 @@ export async function refreshInstalled() {
   try { installedCache = await invoke('models.list'); } catch { installedCache = []; }
 }
 
-export function whisperEntry() {
+export function asrEntry() {
   const byId = installedCache.find(m => m.kind === 'asr' && m.modelId === settings.asrModelId);
   return byId || installedCache.find(m => m.kind === 'asr') || null;
 }
+// Back-compat alias.
+export const whisperEntry = asrEntry;
+
+const OFFLINE_ASR = ['whisper', 'moonshine', 'sensevoice', 'zipformer'];
 
 export function resolveAsr() {
-  const w = whisperEntry();
-  if (settings.asrEngine === 'whisper') return w ? { engine: 'whisper', entry: w } : { engine: 'system', entry: null };
-  if (settings.asrEngine === 'system') return { engine: 'system', entry: null };
-  return w ? { engine: 'whisper', entry: w } : { engine: 'system', entry: null };
+  const eng = settings.asrEngine || 'auto';
+  if (eng === 'system') return { engine: 'system', entry: null };
+  const entry = asrEntry();
+  if (!entry) return { engine: 'system', entry: null };
+  const engine = (eng !== 'auto' && OFFLINE_ASR.includes(eng)) ? eng : (entry.engine || 'whisper');
+  return { engine, entry };
 }
 
-/** Voice input is available when Whisper is installed, an omni model is
- *  loaded, or the Android system recognizer can serve. */
+/** Voice input is available when an offline ASR model is installed, an omni
+ *  model is loaded, or the Android system recognizer can serve. */
 export function voiceAvailable() {
   if (!hasNative()) return false;
-  const { engine, entry } = resolveAsr();
-  if (engine === 'whisper' && entry) return true;
   return true; // system recognizer fallback is always present on Android
 }
 export function offlineVoiceReady() {
   const { engine, entry } = resolveAsr();
-  return (engine === 'whisper' && !!entry) || !!llm.info?.audio;
+  return (OFFLINE_ASR.includes(engine) && !!entry) || !!llm.info?.audio;
 }
 
 function b64(int16buf) {
@@ -101,9 +105,9 @@ export async function startListening(mode, cbs) {
   wireAsrEvents();
   const { engine, entry } = resolveAsr();
   // Spec guard: never auto-open the mic when no offline voice model exists —
-  // whisper path requires the model; system path uses Android's own capture.
-  if (engine === 'whisper' && !entry) throw new Error('Install Whisper from Model Hub → Supplementary');
-  if (engine === 'whisper') await startMic();
+  // the offline path requires the model; system path uses Android's own capture.
+  if (engine !== 'system' && !entry) throw new Error('Install an ASR model from Model Hub → Supplementary');
+  if (engine !== 'system') await startMic();
   await invoke('asr.start', {
     engine, mode,
     dir: entry?.path || null,
@@ -150,15 +154,27 @@ export async function configureVoice() {
   await refreshInstalled();
   if (!hasNative()) return;
   let dir = null;
-  if (['pocket', 'vits', 'kokoro'].includes(settings.ttsEngine)) {
+  // "phonon" is now a real Piper VITS pack; resolve its directory like vits.
+  const eng = settings.ttsEngine === 'phonon' ? 'vits' : settings.ttsEngine;
+  if (['pocket', 'vits', 'kokoro'].includes(eng)) {
     const entry = installedCache.find(m => m.kind === 'tts' && m.modelId === settings.ttsModelId)
-      || installedCache.find(m => m.kind === 'tts' && m.engine === settings.ttsEngine);
+      || installedCache.find(m => m.kind === 'tts' && m.engine === eng);
     dir = entry?.path || null;
     if (!dir) { emitLocal('voice.engineFallback', { engine: settings.ttsEngine }); }
   }
   try {
     await invoke('tts.configure', { engine: settings.ttsEngine, dir, speed: settings.ttsSpeed, sid: settings.ttsSid || 0 });
   } catch {}
+}
+
+/** Speak a short preview line with a specific speaker id (voice picker). */
+export function previewVoice(text, sid) {
+  if (!hasNative()) { phonon.speak(text, { rate: settings.ttsSpeed }); return; }
+  wireTts();
+  stopSpeech();
+  const id = 'pv' + (++utterSeq);
+  currentUtter = { id, onLevel: null, onEnd: null };
+  invoke('tts.speak', { utterId: id, text, sid }).catch(() => { if (currentUtter?.id === id) currentUtter = null; });
 }
 
 let ttsOffs = [];
@@ -183,7 +199,8 @@ export function speak(text, { onStart, onLevel, onEnd } = {}) {
   const id = 'u' + (++utterSeq);
   currentUtter = { id, onLevel, onEnd };
   onStart?.();
-  if (settings.ttsEngine === 'phonon' || !hasNative()) {
+  if (!hasNative()) {
+    // Web preview only — the Android app always uses the real neural engine.
     phonon.speak(clean, {
       rate: settings.ttsSpeed,
       onLevel: l => { if (currentUtter?.id === id) onLevel?.(l); },

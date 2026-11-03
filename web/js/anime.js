@@ -9,10 +9,10 @@ export const ANIME_DEFS = {
   namaste: {
     duration: 3.0,
     bones: {
-      leftUpperArm:  [{ t: 0 }, { t: 0.28, z: -0.72, y: -0.42 }, { t: 0.72, z: -0.72, y: -0.42 }, { t: 1 }],
-      rightUpperArm: [{ t: 0 }, { t: 0.28, z: 0.72, y: 0.42 }, { t: 0.72, z: 0.72, y: 0.42 }, { t: 1 }],
-      leftLowerArm:  [{ t: 0 }, { t: 0.28, z: 1.62 }, { t: 0.72, z: 1.62 }, { t: 1 }],
-      rightLowerArm: [{ t: 0 }, { t: 0.28, z: -1.62 }, { t: 0.72, z: -1.62 }, { t: 1 }],
+      leftUpperArm:  [{ t: 0 }, { t: 0.28, z: -0.72, y: -0.55 }, { t: 0.72, z: -0.72, y: -0.55 }, { t: 1 }],
+      rightUpperArm: [{ t: 0 }, { t: 0.28, z: 0.72, y: 0.55 }, { t: 0.72, z: 0.72, y: 0.55 }, { t: 1 }],
+      leftLowerArm:  [{ t: 0 }, { t: 0.28, z: 1.45 }, { t: 0.72, z: 1.45 }, { t: 1 }],
+      rightLowerArm: [{ t: 0 }, { t: 0.28, z: -1.45 }, { t: 0.72, z: -1.45 }, { t: 1 }],
       leftHand:      [{ t: 0 }, { t: 0.3, z: 0.25 }, { t: 0.7, z: 0.25 }, { t: 1 }],
       rightHand:     [{ t: 0 }, { t: 0.3, z: -0.25 }, { t: 0.7, z: -0.25 }, { t: 1 }],
       spine:         [{ t: 0 }, { t: 0.32, x: 0.1 }, { t: 0.5, x: 0.24 }, { t: 0.68, x: 0.1 }, { t: 1 }],
@@ -79,8 +79,8 @@ export const ANIME_DEFS = {
   think: {
     duration: 3.2,
     bones: {
-      rightUpperArm: [{ t: 0 }, { t: 0.3, z: 0.55, y: 0.5 }, { t: 0.78, z: 0.55, y: 0.5 }, { t: 1 }],
-      rightLowerArm: [{ t: 0 }, { t: 0.3, z: -1.75 }, { t: 0.78, z: -1.75 }, { t: 1 }],
+      rightUpperArm: [{ t: 0 }, { t: 0.3, z: 0.55, y: 0.55 }, { t: 0.78, z: 0.55, y: 0.55 }, { t: 1 }],
+      rightLowerArm: [{ t: 0 }, { t: 0.3, z: -1.5 }, { t: 0.78, z: -1.5 }, { t: 1 }],
       rightHand: [{ t: 0 }, { t: 0.3, x: -0.2 }, { t: 0.78, x: -0.2 }, { t: 1 }],
       head: [{ t: 0 }, { t: 0.35, x: 0.1, z: 0.09, y: 0.08 }, { t: 0.78, x: 0.1, z: 0.09, y: 0.08 }, { t: 1 }],
       leftUpperArm: [{ t: 0 }, { t: 0.3, z: -0.15, y: -0.15 }, { t: 0.78, z: -0.15, y: -0.15 }, { t: 1 }],
@@ -120,10 +120,10 @@ export const ANIME_DEFS = {
     bones: {
       head: [{ t: 0 }, { t: 0.3, x: 0.14, y: 0.28 }, { t: 0.75, x: 0.14, y: 0.28 }, { t: 1 }],
       spine: [{ t: 0 }, { t: 0.3, x: 0.08 }, { t: 0.75, x: 0.08 }, { t: 1 }],
-      leftUpperArm:  [{ t: 0 }, { t: 0.3, z: -0.95, y: -0.3 }, { t: 0.75, z: -0.95, y: -0.3 }, { t: 1 }],
-      rightUpperArm: [{ t: 0 }, { t: 0.3, z: 0.95, y: 0.3 }, { t: 0.75, z: 0.95, y: 0.3 }, { t: 1 }],
-      leftLowerArm:  [{ t: 0 }, { t: 0.3, z: 1.9 }, { t: 0.75, z: 1.9 }, { t: 1 }],
-      rightLowerArm: [{ t: 0 }, { t: 0.3, z: -1.9 }, { t: 0.75, z: -1.9 }, { t: 1 }],
+      leftUpperArm:  [{ t: 0 }, { t: 0.3, z: -0.95, y: -0.42 }, { t: 0.75, z: -0.95, y: -0.42 }, { t: 1 }],
+      rightUpperArm: [{ t: 0 }, { t: 0.3, z: 0.95, y: 0.42 }, { t: 0.75, z: 0.95, y: 0.42 }, { t: 1 }],
+      leftLowerArm:  [{ t: 0 }, { t: 0.3, z: 1.5 }, { t: 0.75, z: 1.5 }, { t: 1 }],
+      rightLowerArm: [{ t: 0 }, { t: 0.3, z: -1.5 }, { t: 0.75, z: -1.5 }, { t: 1 }],
     },
     expr: [{ t: 0 }, { t: 0.3, values: { happy: 0.3, blush: 0.8 } }, { t: 0.78, values: { happy: 0.3, blush: 0.8 } }, { t: 1 }],
   },

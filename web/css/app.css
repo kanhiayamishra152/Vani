@@ -481,3 +481,37 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 22p
 .muted { color: var(--text-2); }
 .small { font-size: 12.5px; }
 .mt8 { margin-top: 8px; } .mt16 { margin-top: 16px; }
+
+/* ============================================================
+   VANI AI v1.2.0 — Installed section, voice pickers, select fields
+   ============================================================ */
+.installed-section { margin-bottom: 18px; }
+.installed-row {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--surface-1); border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm); padding: 10px 12px; margin-bottom: 8px;
+}
+.installed-info { flex: 1; min-width: 0; }
+.installed-name { font-size: 14px; font-weight: 700; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.installed-meta { font-size: 11.5px; color: var(--text-2); margin-top: 2px; }
+.btn-sm { padding: 7px 12px !important; font-size: 12.5px !important; }
+.btn-sm svg { width: 14px; height: 14px; }
+
+.voice-picker { display: flex; gap: 8px; align-items: center; margin: 10px 0 4px; flex-wrap: wrap; }
+.voice-picker select {
+  flex: 1; min-width: 0; background: var(--surface-3); color: var(--text);
+  border: 1px solid var(--hairline); border-radius: var(--radius-sm);
+  padding: 9px 10px; font-size: 13px; font-family: var(--font);
+  appearance: none; -webkit-appearance: none;
+}
+.voice-picker select:focus { border-color: #52525B; outline: none; }
+.voice-picker .btn-sm { white-space: nowrap; }
+
+.field select {
+  background: var(--surface-2); color: var(--text);
+  border: 1px solid var(--hairline); border-radius: var(--radius-sm);
+  padding: 11px 12px; font-size: 14px; font-family: var(--font);
+  appearance: none; -webkit-appearance: none; width: 100%;
+}
+.field select:focus { border-color: #52525B; outline: none; }
+.field input[type="text"], .field input[type="url"] { width: 100%; }

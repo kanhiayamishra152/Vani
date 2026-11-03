@@ -80,8 +80,16 @@ public class DownloadService extends Service {
             JSONObject e = saved.optJSONObject(i);
             if (e == null) continue;
             String st = e.optString("state");
-            if (st.equals("downloading") || st.equals("queued") || st.equals("extracting")) {
-                try { e.put("state", "paused"); e.put("error", "Interrupted — tap Resume"); } catch (Exception ignored) {}
+            if (st.equals("downloading") || st.equals("queued") || st.equals("extracting") || st.equals("finalizing")) {
+                long recv = e.optLong("received", 0), tot = e.optLong("total", 0);
+                try {
+                    if (tot > 0 && recv >= tot) {
+                        // Fully downloaded before interruption: auto-finalize, never "Resume at 100%".
+                        e.put("state", "queued"); e.put("error", "");
+                    } else {
+                        e.put("state", "paused"); e.put("error", "Interrupted — tap Resume");
+                    }
+                } catch (Exception ignored) {}
                 Downloads.upsert(this, e);
             }
             liveMeta.put(e.optString("id"), e);
@@ -134,6 +142,9 @@ public class DownloadService extends Service {
         } catch (Exception e) {
             Log.e(TAG, "command failed", e);
         }
+        // Drain any entries onCreate restored to "queued" (e.g. auto-finalize a
+        // fully-downloaded model after an app kill). pump() is idempotent.
+        pump();
         return START_NOT_STICKY;
     }
 
@@ -195,32 +206,37 @@ public class DownloadService extends Service {
         }
     }
 
-    private void download(JSONObject e) throws Exception {
-        String id = e.getString("id");
-        String fileName = e.getString("fileName");
-        File modelsDir = Models.modelsDir(this);
-        File part = new File(modelsDir, fileName + ".part");
-        long offset = part.exists() ? part.length() : 0;
-        long total = e.optLong("total", 0);
+    private static class PauseSignal extends Exception {}
+    private static class CancelSignal extends Exception {}
 
-        HttpURLConnection con = (HttpURLConnection) new URL(e.getString("url")).openConnection();
+    private static String sanitize(String s) { return s.replaceAll("[^A-Za-z0-9._-]", "_"); }
+
+    /**
+     * Download one URL to {@code dest} (final path) via {@code dest.part} + HTTP Range.
+     * Emits aggregate progress (baseReceived + received) / totalAll. Idempotent: a
+     * complete final file is skipped. Throws PauseSignal / CancelSignal on user action.
+     */
+    private long downloadOne(JSONObject e, String url, File dest, long expected, long baseReceived, long totalAll) throws Exception {
+        String id = e.getString("id");
+        if (dest.exists() && expected > 0 && dest.length() == expected) return dest.length();
+        File part = new File(dest.getParentFile(), dest.getName() + ".part");
+        long offset = part.exists() ? part.length() : 0;
+        if (expected > 0 && offset > expected) { part.delete(); offset = 0; }
+
+        HttpURLConnection con = (HttpURLConnection) new URL(url).openConnection();
         con.setConnectTimeout(30000);
         con.setReadTimeout(30000);
         con.setInstanceFollowRedirects(true);
-        con.setRequestProperty("User-Agent", "VaniAI/1.0.0 (Android)");
+        con.setRequestProperty("User-Agent", "VaniAI/1.2.0 (Android)");
         if (offset > 0) con.setRequestProperty("Range", "bytes=" + offset + "-");
         int code = con.getResponseCode();
         boolean append = code == 206;
         if (code == 200 && offset > 0) { offset = 0; append = false; }
         if (code != 200 && code != 206) throw new IOException("HTTP " + code);
-        if (total <= 0) {
-            long cl = con.getContentLengthLong();
-            if (cl > 0) total = cl + offset;
-        }
 
         liveState.put(id, "downloading");
         patchPersist(id, "state", "downloading");
-        patchPersist(id, "total", total);
+        if (totalAll > 0) patchPersist(id, "total", totalAll);
         emitState(id);
 
         long received = offset;
@@ -233,58 +249,118 @@ public class DownloadService extends Service {
             while ((n = in.read(buf)) > 0) {
                 String st = liveState.get(id);
                 if ("paused".equals(st)) {
-                    patchPersist(id, "received", received);
+                    patchPersist(id, "received", baseReceived + received);
                     patchPersist(id, "state", "paused");
-                    emitProgress(id, received, total, 0, "paused");
-                    return;
+                    emitProgress(id, baseReceived + received, totalAll, 0, "paused");
+                    throw new PauseSignal();
                 }
-                if ("cancelled".equals(st)) { part.delete(); return; }
+                if ("cancelled".equals(st)) { part.delete(); throw new CancelSignal(); }
                 out.write(buf, 0, n);
                 received += n;
                 long now = System.currentTimeMillis();
-                if (now - lastEmit >= 500) {
+                if (now - lastEmit >= 400) {
                     double inst = (received - lastBytes) * 1000.0 / Math.max(1, now - lastEmit);
                     speed = speed == 0 ? inst : speed * 0.7 + inst * 0.3;
                     lastEmit = now; lastBytes = received;
-                    emitProgress(id, received, total, speed, "downloading");
-                    patchPersist(id, "received", received);
-                    notifyProgress(e, received, total, speed);
+                    emitProgress(id, baseReceived + received, totalAll, speed, "downloading");
+                    patchPersist(id, "received", baseReceived + received);
+                    notifyProgress(e, baseReceived + received, totalAll, speed);
                 }
             }
         } finally {
             con.disconnect();
         }
+        if (dest.exists()) dest.delete();
+        if (!part.renameTo(dest)) throw new IOException("rename failed");
+        return dest.length();
+    }
 
-        // Complete: rename .part -> final, extract archives, register model.
-        liveState.put(id, "extracting");
-        emitProgress(id, received, total, 0, e.optBoolean("extract") ? "extracting" : "finalizing");
-        File fin = new File(modelsDir, fileName);
-        if (fin.exists()) fin.delete();
-        if (!part.renameTo(fin)) throw new IOException("rename failed");
+    private void download(JSONObject e) throws Exception {
+        String id = e.getString("id");
+        File modelsDir = Models.modelsDir(this);
 
-        String path = fin.getAbsolutePath();
-        boolean isDir = false;
-        long size = fin.length();
-        if (e.optBoolean("extract")) {
-            File dir = extractTarBz2(fin, modelsDir);
-            path = dir.getAbsolutePath();
-            isDir = true;
-            size = Models.treeSize(dir);
-            fin.delete();
+        // Idempotent finalize: if this exact model+quant is already installed with a
+        // valid path, never re-download — just mark done (fixes "Resume at 100%").
+        JSONArray installed = Models.list(this);
+        for (int i = 0; i < installed.length(); i++) {
+            JSONObject m = installed.optJSONObject(i);
+            if (m == null) continue;
+            if (m.optString("modelId").equals(e.optString("modelId"))
+                    && m.optString("quant").equals(e.optString("quant"))
+                    && !m.optString("path").isEmpty() && new File(m.optString("path")).exists()) {
+                finishDone(e, id);
+                return;
+            }
         }
 
+        JSONArray files = e.optJSONArray("files");
+        String path;
+        boolean isDir = false;
+        long size;
+        try {
+            if (files != null && files.length() > 0) {
+                // Multi-file standalone model (no archive extraction).
+                File targetDir = new File(modelsDir, sanitize(e.optString("modelId", id)));
+                targetDir.mkdirs();
+                long totalAll = 0;
+                for (int i = 0; i < files.length(); i++) totalAll += files.getJSONObject(i).optLong("bytes", 0);
+                if (totalAll <= 0) totalAll = e.optLong("total", 0);
+                patchPersist(id, "total", totalAll);
+                long receivedAll = 0;
+                for (int i = 0; i < files.length(); i++) {
+                    JSONObject f = files.getJSONObject(i);
+                    File dest = new File(targetDir, f.getString("name"));
+                    receivedAll += downloadOne(e, f.getString("url"), dest, f.optLong("bytes", 0), receivedAll, totalAll);
+                }
+                path = targetDir.getAbsolutePath();
+                isDir = true;
+                size = Models.treeSize(targetDir);
+            } else {
+                String fileName = e.getString("fileName");
+                File fin = new File(modelsDir, fileName);
+                long total = e.optLong("total", 0);
+                boolean haveComplete = fin.exists() && (total <= 0 || fin.length() >= total);
+                if (!haveComplete) {
+                    downloadOne(e, e.getString("url"), fin, total, 0, total);
+                }
+                path = fin.getAbsolutePath();
+                size = fin.length();
+                if (e.optBoolean("extract")) {
+                    liveState.put(id, "extracting");
+                    patchPersist(id, "state", "extracting");
+                    emitProgress(id, total, total, 0, "extracting");
+                    File dir = extractTarBz2(fin, modelsDir, id, e);
+                    path = dir.getAbsolutePath();
+                    isDir = true;
+                    size = Models.treeSize(dir);
+                    fin.delete();
+                }
+            }
+        } catch (PauseSignal ps) {
+            return;
+        } catch (CancelSignal cs) {
+            return;
+        }
+
+        // Register + finalize.
+        liveState.put(id, "finalizing");
+        emitProgress(id, e.optLong("total", 0), e.optLong("total", 0), 0, "finalizing");
         JSONObject reg = new JSONObject();
         reg.put("modelId", e.optString("modelId"));
-        reg.put("name", e.optString("name", fileName));
+        reg.put("name", e.optString("name", e.optString("fileName", "model")));
         reg.put("kind", e.optString("kind"));
         reg.put("quant", e.optString("quant"));
-        reg.put("fileName", fileName);
+        reg.put("fileName", e.optString("fileName", ""));
         reg.put("path", path);
         reg.put("dir", isDir);
         reg.put("sizeBytes", size);
-        reg.put("engine", engineFor(e.optString("modelId")));
+        reg.put("engine", engineFor(e.optString("modelId"), e.optString("engine")));
+        reg.put("category", e.optString("category"));
         Models.register(this, reg);
+        finishDone(e, id);
+    }
 
+    private void finishDone(JSONObject e, String id) throws Exception {
         liveState.put(id, "done");
         liveMeta.remove(id);
         Downloads.remove(this, id);
@@ -294,25 +370,36 @@ public class DownloadService extends Service {
         emit("models.changed", "{}");
     }
 
-    private static String engineFor(String modelId) {
+    private static String engineFor(String modelId, String hint) {
+        if (hint != null && !hint.isEmpty()) return hint;
         switch (modelId) {
-            case "pocket-tts": return "pocket";
+            case "phonon":
             case "piper-lessac": return "vits";
+            case "pocket-tts": return "pocket";
             case "kokoro": return "kokoro";
             case "whisper-tiny":
-            case "whisper-base": return "whisper";
+            case "whisper-base":
+            case "whisper-small": return "whisper";
+            case "moonshine-tiny":
+            case "moonshine-base": return "moonshine";
+            case "sensevoice": return "sensevoice";
+            case "zipformer": return "zipformer";
             default: return "";
         }
     }
 
-    /** Extract .tar.bz2 safely; returns the top-level model directory. */
-    private File extractTarBz2(File archive, File destRoot) throws IOException {
+    /** Extract .tar.bz2 safely with live progress; returns the top-level model dir. */
+    private File extractTarBz2(File archive, File destRoot, String id, JSONObject e) throws IOException {
         String topDir = null;
+        long lastEmit = 0;
+        int entries = 0;
+        long extracted = 0;
         try (TarArchiveInputStream tar = new TarArchiveInputStream(
                 new BZip2CompressorInputStream(new BufferedInputStream(new FileInputStream(archive), 65536)))) {
             TarArchiveEntry entry;
             byte[] buf = new byte[65536];
             while ((entry = tar.getNextTarEntry()) != null) {
+                if ("cancelled".equals(liveState.get(id))) throw new IOException("cancelled");
                 String name = entry.getName();
                 if (name.contains("..")) continue;
                 if (topDir == null) {
@@ -324,13 +411,34 @@ public class DownloadService extends Service {
                 out.getParentFile().mkdirs();
                 try (FileOutputStream fos = new FileOutputStream(out)) {
                     int n;
-                    while ((n = tar.read(buf)) > 0) fos.write(buf, 0, n);
+                    while ((n = tar.read(buf)) > 0) { fos.write(buf, 0, n); extracted += n; }
+                }
+                entries++;
+                long now = System.currentTimeMillis();
+                if (now - lastEmit >= 400) {
+                    lastEmit = now;
+                    emitProgress(id, e.optLong("total", 0), e.optLong("total", 0), 0, "extracting");
+                    notifyExtracting(e, entries, extracted);
                 }
             }
         }
         File dir = topDir != null ? new File(destRoot, topDir) : destRoot;
         if (!dir.exists()) dir.mkdirs();
         return dir;
+    }
+
+    private void notifyExtracting(JSONObject e, int entries, long extracted) {
+        String id = e.optString("id");
+        String mb = String.format(Locale.US, "Extracting… %.0f MB (%d files)", extracted / 1048576.0, entries);
+        Notification n = new NotificationCompat.Builder(this, CHANNEL)
+                .setSmallIcon(android.R.drawable.stat_sys_download)
+                .setContentTitle(e.optString("name", "Installing model"))
+                .setContentText(mb)
+                .setProgress(100, 100, true)
+                .setOngoing(true)
+                .setOnlyAlertOnce(true)
+                .build();
+        getSystemService(NotificationManager.class).notify(notifId(id), n);
     }
 
     /* ---------------- notifications ---------------- */

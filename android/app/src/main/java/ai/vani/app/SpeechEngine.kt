@@ -27,6 +27,9 @@ import com.k2fsa.sherpa.onnx.OfflineTtsModelConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsPocketModelConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsVitsModelConfig
 import com.k2fsa.sherpa.onnx.OfflineWhisperModelConfig
+import com.k2fsa.sherpa.onnx.OfflineMoonshineModelConfig
+import com.k2fsa.sherpa.onnx.OfflineSenseVoiceModelConfig
+import com.k2fsa.sherpa.onnx.OfflineTransducerModelConfig
 import com.k2fsa.sherpa.onnx.SileroVadModelConfig
 import com.k2fsa.sherpa.onnx.Vad
 import com.k2fsa.sherpa.onnx.VadModelConfig
@@ -98,13 +101,14 @@ class SpeechEngine(
         exec.submit {
             try {
                 tts?.release(); tts = null
-                ttsEngine = engine
-                when (engine) {
-                    "phonon" -> { /* JS-side formant synth */ }
+                // "phonon" is now a real Piper VITS multi-speaker pack.
+                val normEngine = if (engine == "phonon") "vits" else engine
+                ttsEngine = normEngine
+                when (normEngine) {
                     "system" -> ensureSystemTts()
                     else -> {
                         if (dir.isNotEmpty() && File(dir).exists()) {
-                            tts = buildTts(engine, File(dir))
+                            tts = buildTts(normEngine, File(dir))
                         }
                         if (tts == null) {
                             ensureSystemTts()
@@ -210,6 +214,7 @@ class SpeechEngine(
         val utterId = a.optString("utterId", "u0")
         val text = a.optString("text", "")
         if (text.isBlank()) { err(id, "empty text"); return }
+        val sid = if (a.has("sid")) a.optInt("sid", ttsSid) else ttsSid
         stopTts()
         currentUtterId = utterId
         ttsStop = false
@@ -231,7 +236,7 @@ class SpeechEngine(
                         .build()
                     audioTrack = track
                     track.play()
-                    neural.generateWithCallback(text = text, sid = ttsSid, speed = ttsSpeed) { samples ->
+                    neural.generateWithCallback(text = text, sid = sid, speed = ttsSpeed) { samples ->
                         if (ttsStop) { interrupted = true; return@generateWithCallback 0 }
                         track.write(samples, 0, samples.size, AudioTrack.WRITE_BLOCKING)
                         var sum = 0.0
@@ -299,6 +304,70 @@ class SpeechEngine(
 
     /* ============================ ASR ============================ */
 
+    private fun isOfflineAsr(engine: String) =
+        engine == "whisper" || engine == "moonshine" || engine == "sensevoice" || engine == "zipformer"
+
+    /** Build an offline recognizer for any supported engine from a model directory. */
+    private fun buildOfflineRecognizer(engine: String, d: File, language: String): OfflineRecognizer? {
+        val tokens = d.walkTopDown().firstOrNull { it.isFile && it.name.endsWith("tokens.txt") }?.absolutePath
+            ?: return null
+        fun find(vararg needles: String, exclude: String = ""): String =
+            d.walkTopDown().firstOrNull { f ->
+                f.isFile && f.name.endsWith(".onnx") &&
+                    needles.all { f.name.lowercase().contains(it) } &&
+                    (exclude.isEmpty() || !f.name.lowercase().contains(exclude))
+            }?.absolutePath ?: ""
+        val modelConfig = when (engine) {
+            "whisper" -> {
+                val encoder = find("encoder"); val decoder = find("decoder")
+                if (encoder.isEmpty() || decoder.isEmpty()) return null
+                OfflineModelConfig(
+                    whisper = OfflineWhisperModelConfig(encoder = encoder, decoder = decoder, language = language, task = "transcribe"),
+                    tokens = tokens, numThreads = 2, modelType = "whisper",
+                )
+            }
+            "moonshine" -> {
+                val pre = find("preprocess")
+                val encoder = find("encode", exclude = "decode")
+                val uncached = find("uncached")
+                val cached = find("cached", exclude = "uncached")
+                val merged = find("merged")
+                if (encoder.isEmpty() || (uncached.isEmpty() && merged.isEmpty())) return null
+                OfflineModelConfig(
+                    moonshine = OfflineMoonshineModelConfig(
+                        preprocessor = pre, encoder = encoder,
+                        uncachedDecoder = uncached, cachedDecoder = cached, mergedDecoder = merged,
+                    ),
+                    tokens = tokens, numThreads = 2,
+                )
+            }
+            "sensevoice" -> {
+                val model = find("model").ifEmpty { find(".onnx") }
+                if (model.isEmpty()) return null
+                OfflineModelConfig(
+                    senseVoice = OfflineSenseVoiceModelConfig(model = model, language = language, useInverseTextNormalization = true),
+                    tokens = tokens, numThreads = 2,
+                )
+            }
+            "zipformer" -> {
+                val encoder = find("encoder"); val decoder = find("decoder"); val joiner = find("joiner")
+                if (encoder.isEmpty() || decoder.isEmpty() || joiner.isEmpty()) return null
+                OfflineModelConfig(
+                    transducer = OfflineTransducerModelConfig(encoder = encoder, decoder = decoder, joiner = joiner),
+                    tokens = tokens, numThreads = 2,
+                )
+            }
+            else -> return null
+        }
+        return OfflineRecognizer(
+            assetManager = null,
+            config = OfflineRecognizerConfig(
+                featConfig = FeatureConfig(sampleRate = 16000, featureDim = 80),
+                modelConfig = modelConfig,
+            ),
+        )
+    }
+
     fun startAsr(a: JSONObject, id: String) {
         val engine = a.optString("engine", "system")
         val mode = a.optString("mode", "vad")
@@ -313,26 +382,10 @@ class SpeechEngine(
                 asrActive = true
                 wasSpeech = false
                 pttBuffer.clear()
-                if (engine == "whisper") {
-                    if (dir.isEmpty() || !File(dir).exists()) throw IllegalStateException("Whisper model not installed")
-                    val d = File(dir)
-                    val encoder = pick(d, "encoder")
-                    val decoder = pick(d, "decoder")
-                    val tokens = d.walkTopDown().firstOrNull { it.name.endsWith("tokens.txt") }?.absolutePath
-                        ?: throw IllegalStateException("Whisper tokens missing")
-                    if (encoder.isEmpty() || decoder.isEmpty()) throw IllegalStateException("Whisper ONNX files missing")
-                    recognizer = OfflineRecognizer(
-                        assetManager = null,
-                        config = OfflineRecognizerConfig(
-                            featConfig = FeatureConfig(sampleRate = 16000, featureDim = 80),
-                            modelConfig = OfflineModelConfig(
-                                whisper = OfflineWhisperModelConfig(encoder = encoder, decoder = decoder, language = language, task = "transcribe"),
-                                tokens = tokens,
-                                numThreads = 2,
-                                modelType = "whisper",
-                            ),
-                        ),
-                    )
+                if (isOfflineAsr(engine)) {
+                    if (dir.isEmpty() || !File(dir).exists()) throw IllegalStateException("$engine model not installed")
+                    recognizer = buildOfflineRecognizer(engine, File(dir), language)
+                        ?: throw IllegalStateException("$engine ONNX files missing")
                     val threshold = (0.85f - sensitivity * 0.7f).coerceIn(0.1f, 0.9f)
                     vad = Vad(
                         assetManager = ctx.assets,
@@ -355,8 +408,18 @@ class SpeechEngine(
                 ok(id)
             } catch (e: Exception) {
                 Log.e(TAG, "asr start", e)
-                asrActive = false
-                err(id, e.message ?: "ASR failed to start")
+                // Never leave Live Talk without ears: fall back to system ASR.
+                try {
+                    try { recognizer?.release() } catch (_: Exception) {}
+                    recognizer = null
+                    asrEngine = "system"
+                    startSystemRecognizer(mode, language)
+                    ev("voice.engineFallback", JSONObject().put("engine", engine).put("reason", e.message ?: "load failed"))
+                    ok(id)
+                } catch (e2: Exception) {
+                    asrActive = false
+                    err(id, e.message ?: "ASR failed to start")
+                }
             }
         }
     }
@@ -411,7 +474,7 @@ class SpeechEngine(
     }
 
     fun feed(pcmBase64: String) {
-        if (!asrActive || asrEngine != "whisper") return
+        if (!asrActive || !isOfflineAsr(asrEngine)) return
         val bytes = Base64.decode(pcmBase64, Base64.DEFAULT)
         val samples = FloatArray(bytes.size / 2)
         for (i in samples.indices) {

@@ -6,6 +6,8 @@ import { invoke, on, hasNative, emitLocal } from './bridge.js';
 import { settings, setSetting, resetSettings, clearAllThreads } from './store.js';
 import { openPromptStudio } from './prompts.js';
 import { llm } from './inference.js';
+import { SUPP_MODELS } from './catalog.js';
+import { configureVoice, previewVoice } from './voice.js';
 
 let device = null;
 let gpuName = null;
@@ -147,29 +149,63 @@ export async function renderSettings() {
   );
 
   const voice = $('#sec-voice');
-  const ttsLabels = { phonon: 'Phonon Ultra-Light', pocket: 'Pocket TTS 100M', vits: 'Piper VITS Lessac', kokoro: 'Kokoro-82M', system: 'System TTS' };
+  const activeTts = SUPP_MODELS.find(m => m.id === settings.ttsModelId);
+  const voiceEngineLabel = settings.ttsEngine === 'system' ? 'System TTS' : (activeTts?.title || settings.ttsEngine);
+  const voiceList = activeTts?.voices || null;
+  const curVoice = voiceList ? (voiceList.find(x => x.id === settings.ttsSid) || voiceList.find(x => x.id === activeTts.defaultVoice) || voiceList[0]) : null;
   voice.append(
-    rowPicker('Live Talk voice', 'Neural engines are installed from Model Hub → Supplementary.', ttsLabels[settings.ttsEngine] || settings.ttsEngine, () => {
+    rowPicker('Live Talk voice', 'Neural voice packs are installed from Model Hub → Supplementary.', voiceEngineLabel, () => {
       emitLocal('sheet.open', {
         title: 'Live Talk voice',
         options: [
-          { label: 'Phonon Ultra-Light', sub: 'Built-in · instant · 0 MB', value: 'phonon' },
-          { label: 'Pocket TTS 100M', sub: 'Install from Supplementary', value: 'pocket' },
-          { label: 'Piper VITS Lessac', sub: 'Install from Supplementary', value: 'vits' },
-          { label: 'Kokoro-82M', sub: 'Install from Supplementary', value: 'kokoro' },
+          { label: 'Phonon Voice Pack', sub: '4 neural voices · ~22 MB', value: 'phonon' },
+          { label: 'Pocket TTS 100M', sub: 'Install from Supplementary', value: 'pocket-tts' },
+          { label: 'Piper VITS Lessac', sub: 'Install from Supplementary', value: 'piper-lessac' },
+          { label: 'Kokoro-82M', sub: 'Multi-voice · Hindi', value: 'kokoro' },
           { label: 'System TTS', sub: 'Android text-to-speech', value: 'system' },
         ],
-        selected: settings.ttsEngine,
-        onPick: v => { setSetting('ttsEngine', v); toast('Voice: ' + ttsLabels[v]); renderSettings(); },
+        selected: settings.ttsEngine === 'system' ? 'system' : settings.ttsModelId,
+        onPick: v => {
+          if (v === 'system') { setSetting('ttsEngine', 'system'); setSetting('ttsModelId', ''); }
+          else {
+            const m = SUPP_MODELS.find(x => x.id === v);
+            if (m) {
+              setSetting('ttsEngine', m.engine); setSetting('ttsModelId', m.id);
+              if (m.voices) { const ids = m.voices.map(x => x.id); if (!ids.includes(settings.ttsSid)) setSetting('ttsSid', m.defaultVoice ?? ids[0]); }
+            }
+          }
+          configureVoice(); toast('Voice: ' + (v === 'system' ? 'System TTS' : (SUPP_MODELS.find(x => x.id === v)?.title || v))); renderSettings();
+        },
       });
     }),
+  );
+  if (voiceList) {
+    voice.append(
+      rowPicker('Voice character', `${activeTts.title} — choose one of ${voiceList.length} voices.`, curVoice ? `${curVoice.label} · ${curVoice.desc}` : 'Select', () => {
+        emitLocal('sheet.open', {
+          title: 'Voice character',
+          options: voiceList.map(x => ({ label: x.label, sub: x.desc, value: x.id })),
+          selected: settings.ttsSid,
+          onPick: v => { setSetting('ttsSid', v); configureVoice(); toast('Voice: ' + (voiceList.find(x => x.id === v)?.label || v)); renderSettings(); },
+        });
+      }),
+      rowButton('Preview voice', 'Hear a sample of the selected voice.', 'Preview', 'volume', () => {
+        Promise.resolve(configureVoice()).then(() => previewVoice('Hello! This is my voice. How does it sound?', settings.ttsSid));
+      }),
+    );
+  }
+  const asrLabels = { auto: 'Auto', whisper: 'Whisper (offline)', moonshine: 'Moonshine (offline)', sensevoice: 'SenseVoice (offline)', zipformer: 'Zipformer (offline)', system: 'System recognizer' };
+  voice.append(
     rowSlider('Speech rate', 'Speaking speed for the Live Talk voice.', 'ttsSpeed', 0.6, 1.6, 0.05, v => v.toFixed(2) + '×'),
-    rowPicker('Speech recognition', 'Whisper runs fully offline; System uses the Android recognizer.', settings.asrEngine === 'whisper' ? 'Whisper (offline)' : settings.asrEngine === 'system' ? 'System recognizer' : 'Auto', () => {
+    rowPicker('Speech recognition', 'Offline ASR runs on-device; System uses the Android recognizer.', asrLabels[settings.asrEngine] || 'Auto', () => {
       emitLocal('sheet.open', {
         title: 'Speech recognition',
         options: [
-          { label: 'Auto', sub: 'Whisper if installed, else System', value: 'auto' },
-          { label: 'Whisper (offline)', sub: 'Install from Supplementary', value: 'whisper' },
+          { label: 'Auto', sub: 'Best installed offline model, else System', value: 'auto' },
+          { label: 'Whisper (offline)', sub: 'Tiny / Base / Small', value: 'whisper' },
+          { label: 'Moonshine (offline)', sub: 'Ultra-fast English', value: 'moonshine' },
+          { label: 'SenseVoice (offline)', sub: 'Multilingual + emotion', value: 'sensevoice' },
+          { label: 'Zipformer (offline)', sub: 'Streaming-fast English', value: 'zipformer' },
           { label: 'System recognizer', sub: 'Android speech services', value: 'system' },
         ],
         selected: settings.asrEngine,
@@ -200,7 +236,7 @@ export async function renderSettings() {
 
   const about = $('#sec-about');
   about.innerHTML = `
-    <div class="settings-row"><div class="row-text"><span class="row-title">Vani AI</span><span class="row-desc">Version 1.0.1 (2) · ai.vani.app · build ${esc(buildInfo?.commit || 'dev')}</span></div><img src="assets/logo-mark.svg" style="width:30px;height:30px" alt=""></div>
+    <div class="settings-row"><div class="row-text"><span class="row-title">Vani AI</span><span class="row-desc">Version 1.2.0 (3) · ai.vani.app · build ${esc(buildInfo?.commit || 'dev')}</span></div><img src="assets/logo-mark.svg" style="width:30px;height:30px" alt=""></div>
     <div class="settings-row"><div class="row-text"><span class="row-title">Private by design</span><span class="row-desc">Inference, speech and chat history stay on this device. Models download only from the sources you choose.</span></div></div>
     <div class="settings-row"><div class="row-text"><span class="row-title">Open source</span><span class="row-desc">llama.cpp · sherpa-onnx · three.js · three-vrm · KaTeX</span></div><button class="btn-secondary" id="about-repo" style="padding:8px 14px;font-size:13px">${icon('link')}<span>GitHub</span></button></div>`;
   about.querySelector('#about-repo').addEventListener('click', () => {
@@ -228,7 +264,7 @@ export function initSettings() {
   });
   on('settings.changed', p => {
     // Re-apply voice config live if Live Talk is running.
-    if (['ttsEngine', 'ttsModelId', 'ttsSpeed', 'asrEngine', 'asrModelId'].includes(p.key)) emitLocal('voice.reconfigure', {});
+    if (['ttsEngine', 'ttsModelId', 'ttsSpeed', 'ttsSid', 'asrEngine', 'asrModelId'].includes(p.key)) emitLocal('voice.reconfigure', {});
   });
   measure().then(() => autoTune(true));
 }

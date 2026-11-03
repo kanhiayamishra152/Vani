@@ -2,13 +2,16 @@ package ai.vani.app;
 
 import android.annotation.SuppressLint;
 import android.app.Activity;
+import android.content.ContentResolver;
 import android.content.Intent;
+import android.database.Cursor;
 import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.OpenableColumns;
 import android.util.Log;
 import android.webkit.PermissionRequest;
 import android.webkit.WebChromeClient;
@@ -20,11 +23,13 @@ import android.webkit.WebViewClient;
 
 import androidx.webkit.WebViewAssetLoader;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -148,49 +153,91 @@ public class MainActivity extends Activity {
         Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         i.addCategory(Intent.CATEGORY_OPENABLE);
         i.setType("*/*");
+        i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
         startActivityForResult(i, REQ_IMPORT);
     }
 
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode == REQ_IMPORT && resultCode == RESULT_OK && data != null && data.getData() != null) {
-            Uri uri = data.getData();
-            io.submit(() -> {
-                try {
-                    String name = "imported-" + System.currentTimeMillis() + ".gguf";
-                    try (android.database.Cursor c = getContentResolver().query(uri, null, null, null, null)) {
-                        if (c != null && c.moveToFirst()) {
-                            int idx = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME);
-                            if (idx >= 0) name = c.getString(idx);
-                        }
-                    }
-                    if (!name.toLowerCase().endsWith(".gguf")) name += ".gguf";
-                    File dir = Models.modelsDir(this);
-                    File out = new File(dir, name);
-                    try (InputStream in = getContentResolver().openInputStream(uri);
-                         FileOutputStream fos = new FileOutputStream(out)) {
-                        byte[] buf = new byte[65536];
-                        int n;
-                        while ((n = in.read(buf)) > 0) fos.write(buf, 0, n);
-                    }
-                    JSONObject e = new JSONObject();
-                    e.put("modelId", "custom");
-                    e.put("name", name.replace(".gguf", ""));
-                    e.put("kind", "llm");
-                    e.put("quant", "");
-                    e.put("fileName", name);
-                    e.put("path", out.getAbsolutePath());
-                    e.put("dir", false);
-                    e.put("sizeBytes", out.length());
-                    Models.register(this, e);
-                    emit("models.changed", "{}");
-                    emitLocalToast("Imported " + name);
-                } catch (Exception e) {
-                    Log.e(TAG, "import failed", e);
-                    emitLocalToast("Import failed: " + e.getMessage());
-                }
-            });
+        if (requestCode == REQ_IMPORT && resultCode == RESULT_OK && data != null) {
+            final java.util.ArrayList<Uri> uris = new java.util.ArrayList<>();
+            if (data.getClipData() != null) {
+                for (int i = 0; i < data.getClipData().getItemCount(); i++) uris.add(data.getClipData().getItemAt(i).getUri());
+            } else if (data.getData() != null) {
+                uris.add(data.getData());
+            }
+            if (uris.isEmpty()) return;
+            io.submit(() -> importFiles(uris));
+        }
+    }
+
+    private String displayName(Uri uri) {
+        String name = "imported-" + System.currentTimeMillis();
+        try (android.database.Cursor c = getContentResolver().query(uri, null, null, null, null)) {
+            if (c != null && c.moveToFirst()) {
+                int idx = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME);
+                if (idx >= 0 && c.getString(idx) != null) name = c.getString(idx);
+            }
+        } catch (Exception ignored) {}
+        return name;
+    }
+
+    private void copyUri(Uri uri, File out) throws Exception {
+        try (InputStream in = getContentResolver().openInputStream(uri);
+             FileOutputStream fos = new FileOutputStream(out)) {
+            byte[] buf = new byte[65536];
+            int n;
+            while (in != null && (n = in.read(buf)) > 0) fos.write(buf, 0, n);
+        }
+    }
+
+    /** Import .gguf (standalone LLM) or a set of .onnx/.bin/.txt files (voice/ASR model). */
+    private void importFiles(java.util.ArrayList<Uri> uris) {
+        try {
+            java.util.ArrayList<String> names = new java.util.ArrayList<>();
+            for (Uri u : uris) names.add(displayName(u));
+
+            if (uris.size() == 1 && names.get(0).toLowerCase().endsWith(".gguf")) {
+                String name = names.get(0);
+                File out = new File(Models.modelsDir(this), name);
+                copyUri(uris.get(0), out);
+                JSONObject e = new JSONObject();
+                e.put("modelId", "custom");
+                e.put("name", name.replaceFirst("(?i)\\.gguf$", ""));
+                e.put("kind", "gguf");
+                e.put("quant", "");
+                e.put("fileName", name);
+                e.put("path", out.getAbsolutePath());
+                e.put("dir", false);
+                e.put("sizeBytes", out.length());
+                e.put("engine", "llm");
+                e.put("category", "general");
+                Models.register(this, e);
+                emit("models.changed", "{}");
+                emitLocalToast("Imported " + name);
+                return;
+            }
+
+            // ONNX / bin / tokens: copy the whole selection into one model directory,
+            // then let the startup scanner register it with an inferred engine.
+            File dir = new File(Models.modelsDir(this), "imported-" + System.currentTimeMillis());
+            dir.mkdirs();
+            int copied = 0;
+            for (int i = 0; i < uris.size(); i++) {
+                String n = names.get(i).replaceAll("[^A-Za-z0-9._-]", "_");
+                String ln = n.toLowerCase();
+                if (!(ln.endsWith(".onnx") || ln.endsWith(".bin") || ln.endsWith(".txt") || ln.endsWith(".json") || ln.endsWith(".gguf"))) continue;
+                copyUri(uris.get(i), new File(dir, n));
+                copied++;
+            }
+            if (copied == 0) { Models.deleteTree(dir); emitLocalToast("No .onnx / .bin / .gguf files selected"); return; }
+            Models.scan(this);
+            emit("models.changed", "{}");
+            emitLocalToast("Imported " + copied + " file" + (copied == 1 ? "" : "s"));
+        } catch (Exception e) {
+            Log.e(TAG, "import failed", e);
+            emitLocalToast("Import failed: " + e.getMessage());
         }
     }
 

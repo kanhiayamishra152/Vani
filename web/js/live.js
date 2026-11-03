@@ -27,6 +27,13 @@ let rawReply = '';
 let overlayShown = false;
 let pttHeld = false;
 let listeningActive = false;
+let thinkWatchdog = null;
+let thinkReassure = null;
+
+function clearThinkWatchdog() {
+  if (thinkWatchdog) { clearTimeout(thinkWatchdog); thinkWatchdog = null; }
+  if (thinkReassure) { clearTimeout(thinkReassure); thinkReassure = null; }
+}
 
 export const isLiveOpen = () => open;
 
@@ -69,23 +76,31 @@ export async function openLive(opts = {}) {
   wirePtt();
 
   store.ensureThread();
-  setStatus('Loading OC-Lily…');
-  avatar = new AvatarStage($('#live-stage'), {
-    batterySaver: () => settings.batterySaver,
-    fpsTarget: () => settings.fpsTarget,
-    onArrive: () => {
-      if (pendingAction) { avatar?.performAction(pendingAction); pendingAction = null; }
-      speakDirect('Hello!');
-    },
-    onError: () => {
-      $('#live-stage').innerHTML = `<div class="live-fallback"><div><img src="assets/logo-mark.svg" style="width:52px;height:52px;margin-bottom:14px" alt=""><p>OC-Lily.vrm is bundled in the Android APK.<br>The web preview cannot fetch Google Drive assets.</p></div></div>`;
-    },
-  });
-  try {
-    await avatar.init();
-    avatar.walkIn();
-    setStatus('Walking in…');
-  } catch { /* fallback panel already shown */ }
+  if (avatar && avatar.renderer && !avatar.disposed) {
+    // Persistent singleton: re-attach the live canvas and resume. The WebGL
+    // context is never destroyed, so re-opening Live is never a black screen.
+    avatar.remount($('#live-stage'));
+    if (pendingAction) { avatar.performAction(pendingAction); pendingAction = null; }
+  } else {
+    setStatus('Loading OC-Lily…');
+    avatar = new AvatarStage($('#live-stage'), {
+      batterySaver: () => settings.batterySaver,
+      fpsTarget: () => settings.fpsTarget,
+      onArrive: () => {
+        if (pendingAction) { avatar?.performAction(pendingAction); pendingAction = null; }
+        speakDirect('Hello!');
+      },
+      onError: () => {
+        const stage = $('#live-stage');
+        if (stage) stage.innerHTML = `<div class="live-fallback"><div><img src="assets/logo-mark.svg" style="width:52px;height:52px;margin-bottom:14px" alt=""><p>OC-Lily.vrm is bundled in the Android APK.<br>The web preview cannot fetch Google Drive assets.</p></div></div>`;
+      },
+    });
+    try {
+      await avatar.init();
+      avatar.walkIn();
+      setStatus('Walking in…');
+    } catch { /* fallback panel already shown */ }
+  }
 
   await setupVoice();
 }
@@ -93,12 +108,13 @@ export async function openLive(opts = {}) {
 export async function closeLive() {
   try {
     gen?.stop(); gen = null;
+    clearThinkWatchdog();
     speechQueue = [];
     voice.stopSpeech();
     await voice.stopListening();
     listeningActive = false;
-    avatar?.dispose();
-    avatar = null;
+    // Singleton: pause the stage, keep the VRM + WebGL context alive for re-open.
+    avatar?.pause();
   } catch (e) {
     console.warn('live teardown', e);
   } finally {
@@ -149,6 +165,7 @@ function bargeIn() {
   speechQueue = [];
   voice.stopSpeech();
   avatar?.setSpeaking(0);
+  clearThinkWatchdog();
   if (gen) { gen.stop(); gen = null; flushReply(); }
   setStatus('Listening');
 }
@@ -217,6 +234,7 @@ function handleUserUtterance(text) {
   }
   setStatus('Thinking…');
   assistantMsg = store.addMessage('assistant', '', { live: true });
+  const replyId = assistantMsg.id;
   rawReply = '';
   sentenceBuf = '';
   spokenConsumed = 0;
@@ -232,16 +250,43 @@ function handleUserUtterance(text) {
     maybeOverlay(content);
   }, 150);
 
+  // Watchdog: Live Talk must NEVER hang on "Thinking…". A stall timer is re-armed
+  // on every token; if generation goes silent for 30 s we stop, flush whatever we
+  // have, and return to listening. A gentle reassurance shows after 4 s.
+  let gotToken = false;
+  clearThinkWatchdog();
+  const armStall = () => {
+    if (thinkWatchdog) clearTimeout(thinkWatchdog);
+    thinkWatchdog = setTimeout(() => {
+      if (!open) return;
+      if (gen) { gen.stop(); gen = null; }
+      if (assistantMsg) { store.updateMessage(assistantMsg.id, { content: rawReply }); assistantMsg = null; }
+      if (!rawReply.trim()) {
+        const msg = 'Sorry, that took too long. Please try again.';
+        store.updateMessage(replyId, { content: msg });
+        addCaption('assistant', msg);
+        speakDirect(msg);
+      } else {
+        feedSpeech(null);
+      }
+      setStatus(mode === 'vad' && !muted ? 'Listening' : 'Ready');
+    }, 30000);
+  };
+  thinkReassure = setTimeout(() => { if (!gotToken && open && gen) setStatus('Still thinking…'); }, 4000);
+  armStall();
+
   gen = generate({
     messages,
     onToken: tok => {
+      if (!gotToken) { gotToken = true; if (thinkReassure) { clearTimeout(thinkReassure); thinkReassure = null; } }
+      armStall();
       rawReply += tok;
       const { content } = splitReasoning(rawReply);
-      feedSpeech(content);
+      feedSpeech(content); // dispatch the first complete sentence to TTS immediately
       paint();
     },
-    onDone: () => { gen = null; flushReply(); feedSpeech(null); },
-    onError: e => { gen = null; flushReply(); toast(e.message); setStatus('Listening'); },
+    onDone: () => { gen = null; clearThinkWatchdog(); flushReply(); feedSpeech(null); },
+    onError: e => { gen = null; clearThinkWatchdog(); flushReply(); toast(e.message); setStatus(mode === 'vad' && !muted ? 'Listening' : 'Ready'); },
   });
 }
 
@@ -356,7 +401,7 @@ function openCommandSheet() {
       $$('button', grid).forEach(b => b.addEventListener('click', () => {
         emitLocal('sheet.close');
         const action = b.dataset.a;
-        store.addMessage('user', `/anime ${action}`, { live: true });
+        // Gesture only — never write a "/anime …" bubble into the chat history.
         avatar?.performAction(action);
       }));
     },
@@ -376,6 +421,7 @@ export function initLive() {
     stopVad();
     voice.stopSpeech();
     speechQueue = [];
+    clearThinkWatchdog();
     if (gen) { gen.stop(); gen = null; flushReply(); }
   });
   on('app.foreground', () => {

@@ -7,7 +7,7 @@ import { initChat, closeDrawer, drawerOpen, closeCamera, cameraOpen } from './ch
 import { initModels } from './models.js';
 import { initSettings } from './settings.js';
 import { initLive, closeLive, isLiveOpen } from './live.js';
-import { refreshStatus } from './inference.js';
+import { refreshStatus, autoRestore } from './inference.js';
 
 let currentTab = 'chat';
 const backStack = [];
@@ -155,8 +155,9 @@ function boot() {
   initSettings();
   initLive();
   refreshStatus();
+  autoRestore();
   nav('chat');
-  console.log('%cVani AI v1.0.1', 'font-weight:bold', hasNative() ? '(Android bridge active)' : '(browser preview)');
+  console.log('%cVani AI v1.2.0', 'font-weight:bold', hasNative() ? '(Android bridge active)' : '(browser preview)');
 }
 
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
