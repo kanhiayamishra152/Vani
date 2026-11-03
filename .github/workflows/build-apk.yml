@@ -110,10 +110,13 @@ jobs:
 
       - name: Run unit + synthetic-rig + interactive browser checks
         run: |
-          npm test
-          node --test tests/*.test.mjs
-          npm i --no-save --no-audit --no-fund playwright-core @sparticuz/chromium
-          node tests/interactive.mjs
+          set -o pipefail
+          {
+            npm test
+            node --test tests/*.test.mjs
+            npm i --no-save --no-audit --no-fund playwright-core @sparticuz/chromium
+            node tests/interactive.mjs
+          } 2>&1 | tee /tmp/vani-tests.log
 
       - name: Prepare signing key
         env:
@@ -156,7 +159,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         run: |
-          if [ -f /tmp/gradle.log ]; then
+          if [ -f /tmp/vani-tests.log ]; then
+            {
+              echo "## Test failure (run ${{ github.run_id }})";
+              echo '```';
+              tail -n 320 /tmp/vani-tests.log;
+              echo '```';
+            } > /tmp/diag.md
+          elif [ -f /tmp/gradle.log ]; then
             {
               echo "## Gradle failure (run ${{ github.run_id }})";
               echo '```';
@@ -166,7 +176,7 @@ jobs:
               echo '```';
             } > /tmp/diag.md
           else
-            echo "No gradle.log captured (failure before assemble)." > /tmp/diag.md
+            echo "No test or gradle log captured (failure before assemble)." > /tmp/diag.md
           fi
           BODY=$(python3 -c "import json,sys; print(json.dumps({'title':'CI build diagnostic','body':open('/tmp/diag.md').read()[:60000]}))")
           curl -fsSL -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
