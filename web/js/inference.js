@@ -36,7 +36,7 @@ export async function loadModel(entry, mmprojEntry) {
       mmprojPath: mmprojEntry?.path || null,
       nCtx: settings.nCtx,
       nThreads: settings.threads,
-      nBatch: 256,
+      nBatch: 512,
       flashAttn: !!settings.flashAttn,
     });
     applyStatus(s);
@@ -92,7 +92,7 @@ let genSeq = 0;
  * Stream a completion. handlers: onToken(text), onDone(stats), onError(err).
  * Returns { genId, stop() }.
  */
-export function generate({ messages, images = [], onToken, onDone, onError }) {
+export function generate({ messages, images = [], thinking, onToken, onDone, onError }) {
   const genId = 'g' + (++genSeq) + '-' + Date.now().toString(36);
   const offs = [
     on('llm.token', p => { if (p.genId === genId) onToken?.(p.text); }),
@@ -110,7 +110,9 @@ export function generate({ messages, images = [], onToken, onDone, onError }) {
       topP: settings.topP,
       topK: settings.topK,
       repeatPenalty: settings.repeatPenalty,
-      enableThinking: !!settings.showReasoning,
+      // Per-model thinking control (chat triangle toggle). Falls back to the
+      // global showReasoning preference when no explicit per-model state given.
+      enableThinking: thinking !== undefined ? !!thinking : !!settings.showReasoning,
     },
   }).catch(e => { cleanup(); onError?.(e); });
   return {

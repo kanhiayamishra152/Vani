@@ -4,7 +4,7 @@
  * Bundles the ES-module app (three.js + three-vrm + KaTeX + app code) with
  * esbuild into a single offline IIFE, copies the offline KaTeX CSS + woff2
  * fonts, the SVG brand assets, the audio worklet and (when present) the
- * optimized OC-Lily VRM into the Android assets tree.
+ * original, unmodified OC-Lily VRM into the Android assets tree.
  */
 import { build } from 'esbuild';
 import { cpSync, mkdirSync, existsSync, readFileSync, writeFileSync, readdirSync, statSync } from 'node:fs';
@@ -54,11 +54,11 @@ if (existsSync(vrmSrc)) {
   const mb = (statSync(vrmSrc).size / 1048576).toFixed(2);
   console.log(`[build-web] bundled OC-Lily.vrm (${mb} MB, served via WebViewAssetLoader)`);
 } else {
-  console.warn('[build-web] WARNING: assets/vrm/OC-Lily.vrm not present — run scripts/fetch-vrm.mjs + optimize-vrm.mjs for a complete APK.');
+  console.warn('[build-web] WARNING: assets/vrm/OC-Lily.vrm not present — run scripts/fetch-vrm.mjs + prepare-vrm-safe.mjs for a complete APK.');
 }
 
 let commit = 'unknown';
 try { commit = execSync('git rev-parse --short HEAD', { cwd: ROOT }).toString().trim(); } catch {}
-const info = { name: 'Vani AI', version: '1.2.0', versionCode: 3, package: 'ai.vani.app', commit, builtAt: new Date().toISOString() };
+const info = { name: 'Vani AI', version: '1.3.0', versionCode: 4, package: 'ai.vani.app', commit, builtAt: new Date().toISOString() };
 writeFileSync(join(OUT, 'build-info.json'), JSON.stringify(info, null, 2));
 console.log('[build-web] done ->', OUT);

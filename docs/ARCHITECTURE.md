@@ -78,8 +78,10 @@ network calls except explicit model downloads.
 ## Build pipeline
 
 `scripts/fetch-native-deps.mjs` pins llama.cpp + sherpa-onnx + silero VAD.
-`scripts/fetch-vrm.mjs` + `optimize-vrm.mjs` fetch the avatar from Drive and
-downscale only textures larger than 1024px (meshes, morphs, spring bones and
-MToon materials are preserved). `scripts/build-web.mjs` bundles the web app
-into Android assets. Gradle + CMake build the native libraries and APK; CI
-signs with a fresh `vani-v1.jks`, aligns, verifies, and publishes Release v1.0.0.
+`scripts/fetch-vrm.mjs` + `prepare-vrm-safe.mjs` fetch the avatar from Drive and
+validate the self-contained GLB without changing a single byte (textures,
+meshes, morphs, spring bones and MToon materials remain original). Runtime
+DPR/MSAA caps and the native memory watchdog handle device pressure without
+lossy asset preprocessing. `scripts/build-web.mjs` bundles the web app into
+Android assets. Gradle + CMake build the native libraries and APK; CI signs
+with the persisted `vani-v1.jks`, aligns, verifies, and publishes Release v1.3.0.

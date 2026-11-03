@@ -9,7 +9,11 @@ const codeRegistry = new Map();
 export function getCode(id) { return codeRegistry.get(id); }
 
 function mathToHtml(tex, displayMode) {
-  try { return katex.renderToString(tex, { throwOnError: false, displayMode, output: 'html', strict: false }); }
+  // v1.3.0 security: KaTeX trust:false disables \href/\includegraphics/\htmlData
+  // (no arbitrary HTML/URLs from model output); maxExpand caps macro-expansion
+  // bombs. Everything else in renderMarkdown is escaped then re-built from a
+  // strict tag whitelist — <script>/<iframe>/on*= /javascript: can never pass.
+  try { return katex.renderToString(tex, { throwOnError: false, displayMode, output: 'html', strict: false, trust: false, maxExpand: 1000 }); }
   catch { return `<code class="inline">${esc(tex)}</code>`; }
 }
 

@@ -59,7 +59,11 @@ Q4_K_M 532,517,120 · Q5_K_M 590,057,728 · Q8_0 811,843,840 · mmproj-F16 204,9
 | Kokoro multi-lang INT8 | kokoro-int8-multi-lang-v1_0.tar.bz2 | 132,353,410 |
 | Kokoro multi-lang FP32 | kokoro-multi-lang-v1_0.tar.bz2 | 349,886,476 |
 
-Phonon ultra-light TTS is a built-in JS formant engine (0 MB download).
+Phonon Ultra-Light 8M (`phonon-ultralight-v1` release) is the genuine
+Paradee-8M v1.2 INT8 four-voice pack (`phonon-ultralight-8m-int8.tar.bz2`,
+7,374,491 bytes in the local builder rehearsal; CI re-measures and updates the
+catalog). The browser-only `phonon.js` formant fallback is not used for Android
+neural voice output.
 
 ### ASR (`asr-models` release)
 | Engine | File | Bytes |
@@ -76,6 +80,8 @@ Phonon ultra-light TTS is a built-in JS formant engine (0 MB download).
 
 OC-Lily.vrm — Google Drive file ID `1vyE1GP6k7cRSoHBW_n8YTmpMBNMajByw`,
 fetched by `scripts/fetch-vrm.mjs` (handles the Drive virus-scan confirm
-token). Only textures larger than 1024px are downscaled; all meshes, the beret,
-sailor dress, blendshapes, spring bones and MToon materials are preserved. The
-VRM is stored uncompressed in APK assets and served via `WebViewAssetLoader`.
+token). The original VRM is preserved byte-for-byte: no texture downscaling,
+re-encoding or geometry optimization; all meshes, the beret, sailor dress,
+blendshapes, spring bones and MToon materials remain untouched. The VRM is
+stored uncompressed in APK assets and served via `WebViewAssetLoader`. Runtime
+DPR/MSAA limits and CrashGuard handle memory pressure without altering it.

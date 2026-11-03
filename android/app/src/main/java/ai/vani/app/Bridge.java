@@ -22,6 +22,14 @@ public final class Bridge {
 
     @JavascriptInterface
     public void invoke(String method, String argsJson, String callbackId) {
+        // v1.3.0 security: the native bridge is ONLY callable from our own
+        // WebViewAssetLoader origin. Any other page (e.g. an injected iframe or
+        // an external navigation) is rejected before dispatch.
+        if (!MainActivity.ASSET_ORIGIN.equals(act.pageOrigin)) {
+            Log.w(TAG, "bridge call from untrusted origin " + act.pageOrigin + " — rejected");
+            err(callbackId, "untrusted origin");
+            return;
+        }
         try {
             JSONObject args = new JSONObject(argsJson == null || argsJson.isEmpty() ? "{}" : argsJson);
             dispatch(method, args, callbackId);
@@ -76,6 +84,17 @@ public final class Bridge {
             case "asr.stop": act.speech.stopAsr(); ok(id, null); break;
             case "asr.feed": act.speech.feed(a.getString("pcm")); ok(id, null); break;
             case "asr.pttRelease": act.speech.pttRelease(); ok(id, null); break;
+
+            // v1.3.0 unified native mic permission + anti-freeze heartbeat.
+            case "mic.ensurePermission": act.ensureMicPermission(id); break;
+            case "system.heartbeat": act.crashGuard.heartbeat(); ok(id, null); break;
+            case "crashguard.state": {
+                android.app.ActivityManager am = (android.app.ActivityManager) act.getSystemService(Context.ACTIVITY_SERVICE);
+                android.app.ActivityManager.MemoryInfo mi = new android.app.ActivityManager.MemoryInfo();
+                am.getMemoryInfo(mi);
+                ok(id, new JSONObject().put("availMb", mi.availMem / 1048576).put("lowMemory", mi.lowMemory));
+                break;
+            }
 
             case "system.copy": {
                 ClipboardManager cm = (ClipboardManager) act.getSystemService(Context.CLIPBOARD_SERVICE);

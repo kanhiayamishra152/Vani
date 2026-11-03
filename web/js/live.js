@@ -1,13 +1,15 @@
-// Vani AI — Module 2: full-screen Live Talk (Liquid-AI-style) with OC-Lily.
-// WebGL lives ONLY here; closing or backgrounding releases everything.
-// The whole spoken conversation is preserved as chat bubbles in the thread.
+// Vani AI — Module 2: full-screen Live Talk with OC-Lily.
+// v1.3.0: floating answer card above the avatar (tap to expand into a full
+// reader with Copy / Copy Code / KaTeX), one-tap Chat History sheet, and a
+// Keyboard input bar so you can type to the character while she animates.
 import { $, $$, el, esc, throttle } from './util.js';
 import { icon } from './icons.js';
 import { toast } from './toast.js';
 import { on, hasNative, emitLocal } from './bridge.js';
 import { settings } from './store.js';
 import * as store from './store.js';
-import { renderMarkdown, splitReasoning, hasCodeOrMath } from './markdown.js';
+import { renderMarkdown, splitReasoning, getCode } from './markdown.js';
+import { copyText } from './util.js';
 import { llm, isReady, generate, buildContextMessages } from './inference.js';
 import { AvatarStage } from './avatar.js';
 import { ANIME_ACTIONS } from './catalog.js';
@@ -24,11 +26,12 @@ let speaking = false;
 let sentenceBuf = '';
 let assistantMsg = null;
 let rawReply = '';
-let overlayShown = false;
 let pttHeld = false;
 let listeningActive = false;
 let thinkWatchdog = null;
 let thinkReassure = null;
+let spokenConsumed = 0;
+let lastAnswer = '';      // full text of the most recent reply (for the reader)
 
 function clearThinkWatchdog() {
   if (thinkWatchdog) { clearTimeout(thinkWatchdog); thinkWatchdog = null; }
@@ -51,10 +54,26 @@ export async function openLive(opts = {}) {
       <div class="live-title"><b>Live Talk</b>
         <span class="live-status"><span class="live-dot listening" id="live-dot"></span><span id="live-status-text">Waking up…</span></span>
       </div>
-      <button id="live-close" aria-label="End Live Talk">${icon('x')}</button>
+      <div class="live-top-actions">
+        <button id="live-history-open" class="live-top-btn" aria-label="Chat History">${icon('menu')}<span>History</span></button>
+        <button id="live-close" aria-label="End Live Talk">${icon('x')}</button>
+      </div>
     </div>
-    <div class="live-captions" id="live-captions"></div>
-    <div id="live-overlay-slot"></div>
+    <button id="live-answer" class="live-answer" hidden aria-label="Read the answer">
+      <span class="live-answer-text" id="live-answer-text"></span>
+      <span class="live-answer-hint">${icon('more')} Tap to read</span>
+    </button>
+    <div id="live-reader" class="live-reader" hidden>
+      <div class="live-reader-head">
+        <button class="btn-secondary btn-sm" id="live-reader-back">${icon('chevronLeft')} Back to Avatar</button>
+        <button class="btn-secondary btn-sm" id="live-reader-copy">${icon('copy')} Copy</button>
+      </div>
+      <div class="live-reader-body msg-text" id="live-reader-body"></div>
+    </div>
+    <div id="live-history" class="live-history" hidden>
+      <div class="live-history-head"><b>Chat History</b><button class="icon-btn" id="live-history-close" aria-label="Close history">${icon('x')}</button></div>
+      <div class="live-history-body" id="live-history-body"></div>
+    </div>
     <div class="live-dock">
       <div class="live-mode-row">
         <button class="pill${mode === 'vad' ? ' active' : ''}" data-mode="vad">Hands-free</button>
@@ -63,22 +82,33 @@ export async function openLive(opts = {}) {
       <div class="live-controls">
         <button class="live-side-btn" id="live-cmds" aria-label="Actions">${icon('sparkles')}</button>
         <button id="live-ptt" aria-label="Talk">${icon('mic')}</button>
+        <button class="live-side-btn" id="live-keyboard-toggle" aria-label="Keyboard">${icon('edit')}</button>
         <button class="live-side-btn" id="live-mute" aria-label="Mute">${icon('volume')}</button>
       </div>
       <div class="live-hint" id="live-hint"></div>
+    </div>
+    <div id="live-keyboard" class="live-keyboard" hidden>
+      <input id="live-kb-input" type="text" placeholder="Type a message or /anime command to OC-Lily…" autocomplete="off">
+      <button id="live-kb-send" class="btn-primary btn-sm" aria-label="Send">${icon('send')}</button>
     </div>`;
 
-  // Unconditional close: even if teardown throws, Live Talk ALWAYS closes.
   $('#live-close').addEventListener('click', () => closeLive());
   $$('.live-mode-row .pill', root).forEach(b => b.addEventListener('click', () => setMode(b.dataset.mode)));
   $('#live-cmds').addEventListener('click', openCommandSheet);
   $('#live-mute').addEventListener('click', toggleMute);
+  $('#live-history-open').addEventListener('click', openHistory);
+  $('#live-history-close').addEventListener('click', closeHistory);
+  $('#live-answer').addEventListener('click', openReader);
+  $('#live-reader-back').addEventListener('click', closeReader);
+  $('#live-reader-copy').addEventListener('click', async () => { (await copyText(lastAnswer)) ? toast('Copied') : toast('Copy failed'); });
+  $('#live-keyboard-toggle').addEventListener('click', toggleKeyboard);
+  $('#live-kb-send').addEventListener('click', sendKeyboardMessage);
+  $('#live-kb-input').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); sendKeyboardMessage(); } });
+  wireReaderCodeCopy();
   wirePtt();
 
   store.ensureThread();
   if (avatar && avatar.renderer && !avatar.disposed) {
-    // Persistent singleton: re-attach the live canvas and resume. The WebGL
-    // context is never destroyed, so re-opening Live is never a black screen.
     avatar.remount($('#live-stage'));
     if (pendingAction) { avatar.performAction(pendingAction); pendingAction = null; }
   } else {
@@ -86,6 +116,11 @@ export async function openLive(opts = {}) {
     avatar = new AvatarStage($('#live-stage'), {
       batterySaver: () => settings.batterySaver,
       fpsTarget: () => settings.fpsTarget,
+      onProgress: (stage, p) => {
+        const label = stage === 'mesh' ? `Loading avatar mesh… ${Math.round(p * 100)}%`
+          : stage === 'shaders' ? 'Compiling shaders…' : 'Ready';
+        setStatus(label);
+      },
       onArrive: () => {
         if (pendingAction) { avatar?.performAction(pendingAction); pendingAction = null; }
         speakDirect('Hello!');
@@ -113,7 +148,6 @@ export async function closeLive() {
     voice.stopSpeech();
     await voice.stopListening();
     listeningActive = false;
-    // Singleton: pause the stage, keep the VRM + WebGL context alive for re-open.
     avatar?.pause();
   } catch (e) {
     console.warn('live teardown', e);
@@ -127,6 +161,68 @@ export async function closeLive() {
   }
 }
 
+/* ============================ floating answer / reader / history / keyboard ============================ */
+function updateAnswerCard() {
+  const card = $('#live-answer'), txt = $('#live-answer-text');
+  if (!card || !txt) return;
+  const { content } = splitReasoning(rawReply);
+  if (!content.trim()) { card.hidden = true; return; }
+  card.hidden = false;
+  txt.textContent = content.length > 160 ? '…' + content.slice(-160) : content;
+}
+
+function openReader() {
+  const reader = $('#live-reader'), body = $('#live-reader-body');
+  if (!reader || !body) return;
+  lastAnswer = splitReasoning(rawReply).content || lastAnswer;
+  body.innerHTML = renderMarkdown(lastAnswer);
+  body.scrollTop = 0;
+  reader.hidden = false;
+}
+function closeReader() { const r = $('#live-reader'); if (r) r.hidden = true; }
+
+function wireReaderCodeCopy() {
+  // Delegate Copy Code clicks inside the reader (code cards carry data-code-id).
+  $('#live-reader-body')?.addEventListener('click', async e => {
+    const btn = e.target.closest?.('[data-code-id]');
+    if (!btn) return;
+    const code = getCode(btn.dataset.codeId);
+    if (code != null) (await copyText(code)) ? toast('Code copied') : toast('Copy failed');
+  });
+}
+
+function openHistory() {
+  const sheet = $('#live-history'), body = $('#live-history-body');
+  if (!sheet || !body) return;
+  const t = store.getThread();
+  const msgs = t?.messages || [];
+  body.innerHTML = msgs.length
+    ? msgs.map(m => `<div class="live-history-msg ${m.role}"><div class="live-history-role">${m.role === 'user' ? 'You' : 'OC-Lily'}</div><div class="msg-text">${m.role === 'assistant' ? renderMarkdown(splitReasoning(m.content || '').content) : esc(m.content || '')}</div></div>`).join('')
+    : '<div class="live-history-empty">No messages yet — say hello!</div>';
+  sheet.hidden = false;
+  body.scrollTop = body.scrollHeight;
+}
+function closeHistory() { const h = $('#live-history'); if (h) h.hidden = true; }
+
+function toggleKeyboard() {
+  const kb = $('#live-keyboard');
+  if (!kb) return;
+  kb.hidden = !kb.hidden;
+  $('#live-keyboard-toggle').classList.toggle('active', !kb.hidden);
+  if (!kb.hidden) { stopVad(); $('#live-kb-input').focus(); }
+  else if (mode === 'vad' && !muted) startVad();
+}
+
+function sendKeyboardMessage() {
+  const input = $('#live-kb-input');
+  const text = input?.value.trim();
+  if (!text) return;
+  input.value = '';
+  const anime = text.match(/^\/anime\s+([a-z]+)/i);
+  if (anime) { avatar?.performAction(anime[1].toLowerCase()); return; }
+  handleUserUtterance(text);
+}
+
 /* ============================ voice loop ============================ */
 async function setupVoice() {
   const hint = $('#live-hint');
@@ -135,7 +231,7 @@ async function setupVoice() {
   if (!isReady()) { hint.textContent = 'Load a model in Model Hub to talk. Avatar actions still work.'; }
   else if (!voice.offlineVoiceReady()) { hint.textContent = 'Tip: install Whisper (Supplementary) for fully offline ears. Using the Android recognizer for now.'; }
   else { hint.textContent = mode === 'vad' ? 'Just speak — I am listening.' : 'Hold the mic button to talk.'; }
-  if (mode === 'vad' && !muted) await startVad();
+  if (mode === 'vad' && !muted && $('#live-keyboard')?.hidden) await startVad();
 }
 
 async function startVad() {
@@ -160,8 +256,6 @@ async function stopVad() {
 }
 
 function bargeIn() {
-  // <50ms interruption: native side already stopped TTS on VAD trigger;
-  // here we halt generation + queued speech and flush the partial reply.
   speechQueue = [];
   voice.stopSpeech();
   avatar?.setSpeaking(0);
@@ -224,35 +318,28 @@ function handleUserUtterance(text) {
   if (anime) { avatar?.performAction(anime[1].toLowerCase()); return; }
   bargeIn();
   store.addMessage('user', text, { live: true });
-  addCaption('user', text);
   if (!isReady()) {
     const reply = 'Please load a model in the Model Hub first, then we can talk.';
     store.addMessage('assistant', reply, { live: true });
-    addCaption('assistant', reply);
+    lastAnswer = reply; rawReply = reply; updateAnswerCard();
     speakDirect(reply);
     return;
   }
   setStatus('Thinking…');
+  avatar?.performAction('think');
   assistantMsg = store.addMessage('assistant', '', { live: true });
   const replyId = assistantMsg.id;
   rawReply = '';
   sentenceBuf = '';
   spokenConsumed = 0;
   speaking = false;
-  overlayShown = false;
   const t = store.getThread();
-  const messages = buildContextMessages(t.messages.filter(m => m.id !== assistantMsg.id), store.activePrompt().text, settings.maxTokens);
-  const cap = addCaption('assistant', '');
-  const paint = throttle(() => {
-    const { content } = splitReasoning(rawReply);
-    cap.textContent = content.slice(-220);
-    scrollCaptions();
-    maybeOverlay(content);
-  }, 150);
+  const thinkOn = store.getModelThinking(llm.info?.name || llm.info?.modelPath || 'default');
+  let sysText = store.activePrompt().text;
+  if (!thinkOn) sysText += '\n\nRespond directly with the final answer only. Do not show step-by-step reasoning and do not use  tags.';
+  const messages = buildContextMessages(t.messages.filter(m => m.id !== assistantMsg.id), sysText, settings.maxTokens);
+  const paint = throttle(() => { updateAnswerCard(); }, 120);
 
-  // Watchdog: Live Talk must NEVER hang on "Thinking…". A stall timer is re-armed
-  // on every token; if generation goes silent for 30 s we stop, flush whatever we
-  // have, and return to listening. A gentle reassurance shows after 4 s.
   let gotToken = false;
   clearThinkWatchdog();
   const armStall = () => {
@@ -264,7 +351,7 @@ function handleUserUtterance(text) {
       if (!rawReply.trim()) {
         const msg = 'Sorry, that took too long. Please try again.';
         store.updateMessage(replyId, { content: msg });
-        addCaption('assistant', msg);
+        lastAnswer = msg; rawReply = msg; updateAnswerCard();
         speakDirect(msg);
       } else {
         feedSpeech(null);
@@ -276,16 +363,16 @@ function handleUserUtterance(text) {
   armStall();
 
   gen = generate({
-    messages,
+    messages, thinking: thinkOn,
     onToken: tok => {
       if (!gotToken) { gotToken = true; if (thinkReassure) { clearTimeout(thinkReassure); thinkReassure = null; } }
       armStall();
       rawReply += tok;
       const { content } = splitReasoning(rawReply);
-      feedSpeech(content); // dispatch the first complete sentence to TTS immediately
+      feedSpeech(content);
       paint();
     },
-    onDone: () => { gen = null; clearThinkWatchdog(); flushReply(); feedSpeech(null); },
+    onDone: () => { gen = null; clearThinkWatchdog(); flushReply(); feedSpeech(null); lastAnswer = splitReasoning(rawReply).content; updateAnswerCard(); },
     onError: e => { gen = null; clearThinkWatchdog(); flushReply(); toast(e.message); setStatus(mode === 'vad' && !muted ? 'Listening' : 'Ready'); },
   });
 }
@@ -294,16 +381,17 @@ function flushReply() {
   if (assistantMsg) { store.updateMessage(assistantMsg.id, { content: rawReply }); assistantMsg = null; }
 }
 
-/** Sentence-level streaming TTS with code/math stripped from speech. */
+/** Sentence-level streaming TTS: feed each clause to the voice while the LLM
+ *  keeps generating the next sentence in parallel (code/math stripped). */
 function feedSpeech(content) {
-  if (content === null) { // flush remainder
+  if (content === null) {
     const rest = sentenceBuf.trim(); sentenceBuf = '';
     if (rest) enqueueSpeech(rest);
     return;
   }
   sentenceBuf = content.slice(spokenConsumed);
   let m;
-  const re = /[.!?।]\s+|\n+/g;
+  const re = /[.!?।,]\s+|\n+/g;
   let lastCut = 0;
   while ((m = re.exec(sentenceBuf))) lastCut = m.index + 1;
   if (lastCut > 0) {
@@ -313,7 +401,6 @@ function feedSpeech(content) {
     enqueueSpeech(part);
   }
 }
-let spokenConsumed = 0;
 
 function enqueueSpeech(text) {
   let clean = text
@@ -351,38 +438,6 @@ function speakDirect(text) {
   if (!speaking) speakNext();
 }
 
-/* ============================ captions & overlay ============================ */
-function addCaption(role, text) {
-  const box = $('#live-captions');
-  if (!box) return null;
-  const cap = el('div', `live-cap ${role}`);
-  cap.textContent = text;
-  box.appendChild(cap);
-  while (box.children.length > 6) box.firstChild.remove();
-  scrollCaptions();
-  return cap;
-}
-function scrollCaptions() { const b = $('#live-captions'); if (b) b.scrollTop = b.scrollHeight; }
-
-function maybeOverlay(content) {
-  if (overlayShown || !hasCodeOrMath(content)) return;
-  overlayShown = true;
-  const slot = $('#live-overlay-slot');
-  if (!slot) return;
-  slot.innerHTML = `
-    <div class="live-overlay-card">
-      <div class="live-overlay-head"><span>Code & Math</span><button class="icon-btn" id="overlay-close" style="width:32px;height:32px">${icon('x')}</button></div>
-      <div class="live-overlay-body msg-text" id="overlay-body"></div>
-    </div>`;
-  const paint = throttle(() => {
-    const body = $('#overlay-body');
-    if (body) { body.innerHTML = renderMarkdown(splitReasoning(rawReply).content); body.scrollTop = body.scrollHeight; }
-  }, 300);
-  const off = on('llm.token', paint);
-  const offDone = on('llm.done', () => { paint(); off(); offDone(); });
-  $('#overlay-close').addEventListener('click', () => { slot.innerHTML = ''; off(); offDone(); });
-}
-
 function setStatus(text) {
   const n = $('#live-status-text');
   if (n) n.textContent = text;
@@ -400,9 +455,7 @@ function openCommandSheet() {
       root.appendChild(grid);
       $$('button', grid).forEach(b => b.addEventListener('click', () => {
         emitLocal('sheet.close');
-        const action = b.dataset.a;
-        // Gesture only — never write a "/anime …" bubble into the chat history.
-        avatar?.performAction(action);
+        avatar?.performAction(b.dataset.a);
       }));
     },
   });
@@ -427,16 +480,18 @@ export function initLive() {
   on('app.foreground', () => {
     if (!open) return;
     avatar?.resume();
-    if (mode === 'vad' && !muted) startVad();
+    if (mode === 'vad' && !muted && $('#live-keyboard')?.hidden) startVad();
   });
-  on('voice.reconfigure', async () => {
-    if (!open) return;
-    await voice.configureVoice();
-  });
-  on('voice.engineFallback', ({ engine }) => {
-    if (open) toast(`${engine} voice not installed — using Phonon. Get it in Model Hub → Supplementary.`);
-  });
+  on('voice.reconfigure', async () => { if (open) await voice.configureVoice(); });
+  on('voice.engineFallback', ({ engine }) => { if (open) toast(`${engine} voice not installed — using Phonon. Get it in Model Hub → Supplementary.`); });
   on('voice.ttsError', ({ error }) => { if (open) toast('TTS: ' + error); });
-  // Reset per-reply speech cursor.
   on('live.transcript', () => { spokenConsumed = 0; });
+  // Anti-freeze circuit breaker: on memory pressure drop the avatar's GPU load.
+  // Critical pressure fully disposes the WebGL context + VRM to return VRAM;
+  // the singleton reloads safely on the next Live open.
+  on('memory.pressure', p => {
+    if (!avatar) return;
+    if (p && p.level === 'critical') { try { avatar.dispose(); } catch {} avatar = null; }
+    else avatar.pause();
+  });
 }

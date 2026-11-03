@@ -39,6 +39,7 @@ public final class LlmEngine {
     private long handle = 0;
     private String modelPath = null;
     private String modelName = null;
+    private String mmprojPath = null;
     private volatile Thread genThread = null;
     private volatile String currentGenId = null;
     private volatile boolean loading = false;
@@ -78,14 +79,14 @@ public final class LlmEngine {
                 String mmproj = a.optString("mmprojPath", null);
                 long h = nativeLoad(path, mmproj == null ? "" : mmproj,
                         a.optInt("nCtx", 4096), a.optInt("nThreads", 4),
-                        a.optInt("nBatch", 256), a.optBoolean("flashAttn", true));
+                        a.optInt("nBatch", 512), a.optBoolean("flashAttn", true));
                 loading = false;
                 if (h == 0) {
                     fail(id, "Failed to load model (unsupported or corrupt GGUF)");
                     act.emit("llm.status", status().toString());
                     return;
                 }
-                synchronized (genLock) { handle = h; modelPath = path; modelName = a.optString("name", new java.io.File(path).getName()); }
+                synchronized (genLock) { handle = h; modelPath = path; modelName = a.optString("name", new java.io.File(path).getName()); mmprojPath = mmproj; }
                 Models.setLastActive(act, path);
                 JSONObject st = status();
                 act.resolve(id, true, st.toString());
@@ -129,8 +130,16 @@ public final class LlmEngine {
         String paramsJson = params == null ? "{}" : params.toString();
         String imagesJson = images == null ? "[]" : images.toString();
         act.resolve(id, true, "{\"started\":true}");
+        final boolean wantsVision = images != null && images.length() > 0 && mmprojPath != null && !mmprojPath.isEmpty();
         genThread = new Thread(() -> {
+            boolean attached = false;
             try {
+                // On-demand projector: attach the ~480 MB mmproj only for this
+                // multimodal turn, then detach to return the RAM to text chat.
+                if (wantsVision) {
+                    attached = nativeAttachMmproj(h, mmprojPath);
+                    if (!attached) throw new IllegalStateException("Vision projector could not be attached");
+                }
                 nativeGenerate(h, messagesJson, paramsJson, imagesJson, genId, new Callback() {
                     @Override public void onToken(String text) {
                         try { act.emit("llm.token", new JSONObject().put("genId", genId).put("text", text).toString()); }
@@ -151,6 +160,8 @@ public final class LlmEngine {
             } catch (Throwable t) {
                 try { act.emit("llm.error", new JSONObject().put("genId", genId).put("error", String.valueOf(t.getMessage())).toString()); }
                 catch (Exception ignored) {}
+            } finally {
+                if (attached) { try { nativeDetachMmproj(h); } catch (Throwable ignored) {} }
             }
         }, "vani-generate");
         genThread.start();
@@ -186,6 +197,8 @@ public final class LlmEngine {
     private static native long nativeLoad(String path, String mmproj, int nCtx, int nThreads, int nBatch, boolean flashAttn);
     private static native String nativeStatus(long handle);
     private static native void nativeGenerate(long handle, String messagesJson, String paramsJson, String imagesJson, String genId, Callback cb);
+    private static native boolean nativeAttachMmproj(long handle, String path);
+    private static native void nativeDetachMmproj(long handle);
     private static native void nativeStop(long handle);
     private static native void nativeFree(long handle);
 }

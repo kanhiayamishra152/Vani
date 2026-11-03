@@ -1,14 +1,11 @@
-// Vani AI — hands-free voice loop: mic capture, VAD / hold-to-talk, TTS.
-// Privacy: getUserMedia is ONLY called when a Whisper ASR model is installed
-// (or an omni model is loaded). The system recognizer path never touches
-// getUserMedia. Constraints avoid Android's "Recording call" banner:
-// echoCancellation:false, noiseSuppression:true.
+// Vani AI — hands-free voice loop: native mic capture, VAD / hold-to-talk, TTS.
+// Android capture is owned exclusively by VaniAudioBridge (16 kHz PCM into
+// sherpa-onnx); this module never calls getUserMedia or opens a second mic.
 import { invoke, on, hasNative, emitLocal } from './bridge.js';
 import { settings } from './store.js';
 import { llm } from './inference.js';
 import { Phonon } from './phonon.js';
 
-let mic = { stream: null, ctx: null, node: null, src: null };
 let listening = false;
 let listenCbs = {};
 const phonon = new Phonon();
@@ -49,43 +46,6 @@ export function offlineVoiceReady() {
   return (OFFLINE_ASR.includes(engine) && !!entry) || !!llm.info?.audio;
 }
 
-function b64(int16buf) {
-  const bytes = new Uint8Array(int16buf);
-  let s = '';
-  for (let i = 0; i < bytes.length; i += 4096) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 4096));
-  return btoa(s);
-}
-
-async function startMic() {
-  if (mic.stream) return;
-  const stream = await navigator.mediaDevices.getUserMedia({
-    audio: { echoCancellation: false, noiseSuppression: true, autoGainControl: true },
-    video: false,
-  });
-  const ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-  await ctx.audioWorklet.addModule('pcm-worklet.js');
-  const src = ctx.createMediaStreamSource(stream);
-  const node = new AudioWorkletNode(ctx, 'pcm-capture');
-  node.port.onmessage = e => {
-    const { pcm, peak } = e.data;
-    listenCbs.onLevel?.(peak);
-    if (listening) invoke('asr.feed', { pcm: b64(pcm) }).catch(() => {});
-  };
-  src.connect(node);
-  // Worklet must reach destination to stay pulled; keep it silent.
-  const mute = ctx.createGain(); mute.gain.value = 0;
-  node.connect(mute); mute.connect(ctx.destination);
-  mic = { stream, ctx, node, src };
-}
-
-export function releaseMic() {
-  try { mic.node?.port.postMessage('stop'); } catch {}
-  try { mic.node?.disconnect(); mic.src?.disconnect(); } catch {}
-  try { mic.stream?.getTracks().forEach(t => t.stop()); } catch {}
-  try { mic.ctx?.close(); } catch {}
-  mic = { stream: null, ctx: null, node: null, src: null };
-}
-
 const asrOffs = [];
 function wireAsrEvents() {
   if (asrOffs.length) return;
@@ -104,10 +64,21 @@ export async function startListening(mode, cbs) {
   listenCbs = cbs;
   wireAsrEvents();
   const { engine, entry } = resolveAsr();
-  // Spec guard: never auto-open the mic when no offline voice model exists —
-  // the offline path requires the model; system path uses Android's own capture.
+  // Spec guard: the offline path requires a model; system path uses Android's
+  // own recognizer. Either way capture is 100% native (no getUserMedia).
   if (engine !== 'system' && !entry) throw new Error('Install an ASR model from Model Hub → Supplementary');
-  if (engine !== 'system') await startMic();
+  // v1.3.0 unified native mic: ensure RECORD_AUDIO, then the native AudioRecord
+  // bridge (VaniAudioBridge) captures 16 kHz PCM straight into sherpa-onnx. This
+  // permanently fixes "Could not receive audio input" (WebView getUserMedia is
+  // never used on Android, and there is never more than one mic consumer).
+  try {
+    const res = await invoke('mic.ensurePermission');
+    if (res && res.granted === false) throw new Error('Microphone permission denied — allow mic access to use voice input.');
+  } catch (e) {
+    if (/permission denied/i.test(e.message || '')) throw e;
+    // Older native build without mic.ensurePermission: proceed (asr.start will
+    // request/verify permission itself).
+  }
   await invoke('asr.start', {
     engine, mode,
     dir: entry?.path || null,
@@ -120,7 +91,6 @@ export async function startListening(mode, cbs) {
 export async function stopListening() {
   listening = false;
   listenCbs = {};
-  releaseMic();
   if (hasNative()) { try { await invoke('asr.stop'); } catch {} }
 }
 
@@ -154,16 +124,16 @@ export async function configureVoice() {
   await refreshInstalled();
   if (!hasNative()) return;
   let dir = null;
-  // "phonon" is now a real Piper VITS pack; resolve its directory like vits.
+  // "phonon" is Piper VITS; phonon-ultra uses the Kokoro-compatible Paradee graph.
   const eng = settings.ttsEngine === 'phonon' ? 'vits' : settings.ttsEngine;
-  if (['pocket', 'vits', 'kokoro'].includes(eng)) {
+  if (['pocket', 'vits', 'kokoro', 'kitten'].includes(eng)) {
     const entry = installedCache.find(m => m.kind === 'tts' && m.modelId === settings.ttsModelId)
       || installedCache.find(m => m.kind === 'tts' && m.engine === eng);
     dir = entry?.path || null;
     if (!dir) { emitLocal('voice.engineFallback', { engine: settings.ttsEngine }); }
   }
   try {
-    await invoke('tts.configure', { engine: settings.ttsEngine, dir, speed: settings.ttsSpeed, sid: settings.ttsSid || 0 });
+    await invoke('tts.configure', { engine: settings.ttsEngine, dir, speed: settings.ttsSpeed, sid: settings.ttsSid || 0, paradee: settings.ttsModelId === 'phonon-ultra' });
   } catch {}
 }
 

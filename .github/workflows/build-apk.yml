@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       publish_release:
-        description: "Publish GitHub Release (v1.2.0)"
+        description: "Publish GitHub Release (v1.3.0)"
         type: boolean
         default: true
 
@@ -19,9 +19,9 @@ permissions:
 env:
   # Release tag for this build. Immutable releases seal their assets at creation;
   # never delete one to retry (that permanently burns the tag). APK is
-  # versionName 1.2.0 / versionCode 3, signed with the committed v1 keystore so
+  # versionName 1.3.0 / versionCode 4, signed with the committed v1 keystore so
   # it installs in-place over v1.0.1 with no uninstall.
-  RELEASE_TAG: "v1.2.0"
+  RELEASE_TAG: "v1.3.0"
   NODE_VERSION: "20"
   GRADLE_VERSION: "8.7"
   ANDROID_PLATFORM: "34"
@@ -87,18 +87,33 @@ jobs:
       - name: Fetch native runtimes (llama.cpp + sherpa-onnx + silero VAD)
         run: node scripts/fetch-native-deps.mjs
 
-      - name: Fetch OC-Lily VRM avatar (100% original, zero compression)
+      - name: Fetch + safely prepare OC-Lily VRM avatar
         run: |
-          # v1.2.0: the optimize/downscale step is REMOVED. The owner's original
-          # VRM is bundled byte-for-byte — no texture resize, no re-encode, no
-          # geometry change. fetch-vrm verifies the GLB magic on download.
+          # Preserve the owner's original VRM byte-for-byte: no texture
+          # downscaling, re-encoding or geometry optimization. The script only
+          # audits the self-contained GLB before it is copied into the APK.
           node scripts/fetch-vrm.mjs
+          node scripts/prepare-vrm-safe.mjs
+          node scripts/prepare-vrm-safe.mjs --check
 
       - name: Generate launcher + splash icons
         run: node scripts/gen-icons.mjs
 
+      - name: Build + size-gate the genuine <9 MiB four-voice TTS pack
+        run: |
+          python3 -m pip install --disable-pip-version-check --no-cache-dir onnx onnxruntime numpy sherpa-onnx==2.0.1
+          node scripts/build-phonon-ultralight.mjs dist-tts --update-catalog
+          python3 scripts/verify-paradee.py dist-tts/work/paradee_int8.onnx dist-tts/work/phonon-ultralight-8m-int8
+
       - name: Build web bundle into Android assets
         run: node scripts/build-web.mjs
+
+      - name: Run unit + synthetic-rig + interactive browser checks
+        run: |
+          npm test
+          node --test tests/*.test.mjs
+          npm i --no-save --no-audit --no-fund playwright-core @sparticuz/chromium
+          node tests/interactive.mjs
 
       - name: Prepare signing key
         env:
@@ -117,10 +132,14 @@ jobs:
           EOF
             echo "Using keystore from repository secret"
           else
-            # gen-keystore.sh creates the JKS AND a matching keystore.properties
-            # (random password when no secret is set). Do not overwrite it.
+            if [ "${GITHUB_EVENT_NAME}" != "pull_request" ]; then
+              echo "ERROR: KEYSTORE_BASE64 is required for a publishable v1.3.0 build; refusing a new incompatible signing key." >&2
+              exit 1
+            fi
+            # PR-only compile checks may use a disposable key; nothing from a
+            # PR is published as an in-place update.
             bash scripts/gen-keystore.sh
-            echo "Reusing committed v1 keystore (gen-keystore.sh keeps it if present, else generates)"
+            echo "Using a disposable PR-only key (release signing secret absent)"
           fi
 
       - name: Assemble release APK
@@ -161,7 +180,7 @@ jobs:
             BT=$(dirname "$(find "$ANDROID_HOME/build-tools" -name zipalign 2>/dev/null | sort -V | tail -1)")
           fi
           RAW=$(find android/app/build/outputs/apk/release -name '*.apk' | head -1)
-          OUT=dist/vani-ai-1.2.0-release.apk
+          OUT=dist/vani-ai-1.3.0-release.apk
           echo "RAW=$RAW"; echo "BT=$BT"
           cp "$RAW" "$OUT"
           # AGP already zipaligns + signs. Verify alignment non-destructively;
@@ -186,23 +205,48 @@ jobs:
       - name: SHA-256 hashes
         run: |
           cd dist
-          sha256sum vani-ai-1.2.0-release.apk vani-ai-1.2.0-source.zip | tee SHA256SUMS.txt
+          sha256sum vani-ai-1.3.0-release.apk vani-ai-1.3.0-source.zip | tee SHA256SUMS.txt
+          cd ..
+          sha256sum dist-tts/phonon-ultralight-8m-int8.tar.bz2 | sed 's#dist-tts/##' | tee -a dist/SHA256SUMS.txt
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: vani-ai-1.2.0-release-apk
+          name: vani-ai-1.3.0-release-apk
           path: |
-            dist/vani-ai-1.2.0-release.apk
+            dist/vani-ai-1.3.0-release.apk
             dist/SHA256SUMS.txt
           if-no-files-found: error
 
       - name: Upload source ZIP artifact
         uses: actions/upload-artifact@v4
         with:
-          name: vani-ai-1.2.0-source
-          path: dist/vani-ai-1.2.0-source.zip
+          name: vani-ai-1.3.0-source
+          path: dist/vani-ai-1.3.0-source.zip
           if-no-files-found: error
+
+      - name: Publish the Ultra-Light TTS pack release
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_release)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          TTS_TAG=phonon-ultralight-v1
+          TTS_ASSETS=(dist-tts/phonon-ultralight-8m-int8.tar.bz2 dist-tts/SHA256SUMS.txt dist-tts/size.json)
+          if ! gh release view "$TTS_TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release create "$TTS_TAG" --repo "$REPO" --target "$GITHUB_SHA" \
+              --title "Vani Phonon Ultra-Light 8M INT8" \
+              --notes "Genuine Paradee-8M v1.2 INT8 pack: four learned voices, 24 kHz, < 9 MiB. SHA-256 is included." \
+              "${TTS_ASSETS[@]}"
+          else
+            if ! gh release view "$TTS_TAG" --repo "$REPO" --json assets --jq '.assets[].name' | grep -qx 'phonon-ultralight-8m-int8.tar.bz2'; then
+              echo "ERROR: $TTS_TAG exists without the required archive; refusing to replace an immutable release." >&2
+              exit 1
+            fi
+            echo "$TTS_TAG already published; preserving its immutable assets."
+          fi
 
       - name: Mirror published assets to gofile.io
         if: github.event_name != 'pull_request'
@@ -216,7 +260,7 @@ jobs:
           # upload the freshly built dist assets.
           if gh release view "$RELEASE_TAG" --repo "$REPO" >/dev/null 2>&1; then
             gh release download "$RELEASE_TAG" --repo "$REPO" \
-              -p 'vani-ai-1.2.0-release.apk' -p 'vani-ai-1.2.0-source.zip' -p 'SHA256SUMS.txt' \
+              -p 'vani-ai-1.3.0-release.apk' -p 'vani-ai-1.3.0-source.zip' -p 'SHA256SUMS.txt' \
               -D dist --clobber || true
           fi
           bash scripts/upload-gofile.sh
@@ -241,7 +285,7 @@ jobs:
             printf '\n_Mirrors: gofile.io upload unavailable for this run._\n' >> /tmp/body.md
           fi
 
-          ASSETS=(dist/vani-ai-1.2.0-release.apk dist/vani-ai-1.2.0-source.zip dist/SHA256SUMS.txt)
+          ASSETS=(dist/vani-ai-1.3.0-release.apk dist/vani-ai-1.3.0-source.zip dist/SHA256SUMS.txt)
 
           if ! gh release view "$RELEASE_TAG" --repo "$REPO" >/dev/null 2>&1; then
             # Immutable-safe: passing files to `gh release create` makes it create
@@ -249,12 +293,12 @@ jobs:
             # before the release seals. (Create-empty-then-upload is rejected 422.)
             # NEVER delete an immutable release to retry: that burns the tag name.
             gh release create "$RELEASE_TAG" --repo "$REPO" --target "$GITHUB_SHA" \
-              --title "Vani AI v1.2.0" --notes-file /tmp/body.md --latest "${ASSETS[@]}"
+              --title "Vani AI v1.3.0" --notes-file /tmp/body.md --latest "${ASSETS[@]}"
           else
             COUNT=$(gh release view "$RELEASE_TAG" --repo "$REPO" --json assets --jq '.assets | length')
             if [ "$COUNT" -ge 3 ]; then
               # Already published with assets: only title/notes may be refreshed.
-              gh release edit "$RELEASE_TAG" --repo "$REPO" --title "Vani AI v1.2.0" --notes-file /tmp/body.md --latest
+              gh release edit "$RELEASE_TAG" --repo "$REPO" --title "Vani AI v1.3.0" --notes-file /tmp/body.md --latest
             else
               echo "ERROR: $RELEASE_TAG exists with only $COUNT assets and is immutable; cannot add assets or reuse the tag. Bump RELEASE_TAG." >&2
               exit 1

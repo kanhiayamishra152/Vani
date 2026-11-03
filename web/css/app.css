@@ -84,6 +84,28 @@ textarea, input { font-family: inherit; }
 .icon-btn.live { border: 1px solid var(--hairline-soft); border-radius: 999px; width: 38px; height: 38px; }
 .icon-btn.danger { color: var(--danger); }
 .icon-btn[disabled] { opacity: 0.35; pointer-events: none; }
+/* Stop button: prominent red so users can halt a running reply instantly. */
+.icon-btn.stop { background: var(--danger); color: #fff; border-radius: 999px; width: 38px; height: 38px; }
+.icon-btn.stop:active { filter: brightness(0.85); }
+
+/* Per-model thinking triangle toggle in the composer. */
+.think-toggle {
+  display: inline-flex; align-items: center; gap: 4px;
+  height: 34px; padding: 0 10px; border-radius: 999px;
+  border: 1px solid var(--hairline); background: var(--surface-2);
+  color: var(--text-2); font-size: 12px; font-weight: 600; cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s; flex: none;
+}
+.think-toggle .think-tri { display: inline-flex; transition: transform 0.18s ease; }
+.think-toggle .think-tri svg { width: 14px; height: 14px; }
+.think-toggle.on { color: #9F8FFF; border-color: #7C6CFF; background: rgba(124, 108, 255, 0.16); }
+.think-toggle.on .think-tri { transform: rotate(90deg); }
+.think-toggle:active { background: var(--surface-3); }
+
+/* Rotating triangle on the collapsible "Thinking" (reasoning) block. */
+.reasoning summary .reasoning-tri { display: inline-flex; transition: transform 0.18s ease; color: var(--text-2); }
+.reasoning summary .reasoning-tri svg { width: 14px; height: 14px; }
+.reasoning[open] summary .reasoning-tri { transform: rotate(90deg); }
 
 #bridge-banner {
   background: var(--surface-2); border-bottom: 1px solid var(--hairline);
@@ -462,6 +484,67 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 22p
 .live-side-btn.muted { color: var(--text-2); opacity: 0.6; }
 .live-hint { font-size: 12px; color: var(--text-2); }
 
+/* v1.3.0 Live Talk surfaces: the avatar stays visible behind lightweight,
+   semi-transparent controls instead of navigating away from Live. */
+.live-top-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.live-top-btn {
+  min-height: 38px; padding: 7px 11px; border-radius: 999px;
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  background: rgba(13,13,13,0.78); border: 1px solid var(--hairline-soft);
+  color: var(--text); font-size: 12px; font-weight: 700; backdrop-filter: blur(8px);
+}
+.live-top-btn svg { width: 17px; height: 17px; }
+.live-top-btn:active { background: var(--surface-3); }
+.live-answer {
+  position: absolute; left: 14px; right: 14px; bottom: 188px; z-index: 9150;
+  display: flex; flex-direction: column; align-items: stretch; gap: 8px;
+  max-height: 27vh; overflow: hidden; padding: 13px 15px; text-align: left;
+  color: var(--text); background: rgba(13,13,13,0.86);
+  border: 1px solid var(--hairline-soft); border-radius: 16px;
+  box-shadow: 0 10px 34px rgba(0,0,0,0.45); backdrop-filter: blur(10px);
+}
+.live-answer-text { font-size: 14.5px; line-height: 1.45; max-height: 17vh; overflow: hidden; white-space: pre-wrap; word-break: break-word; }
+.live-answer-hint { display: inline-flex; align-items: center; gap: 4px; color: var(--text-2); font-size: 11.5px; }
+.live-answer-hint svg { width: 14px; height: 14px; }
+.live-reader {
+  position: absolute; inset: calc(66px + var(--safe-top)) 12px calc(174px + var(--safe-bottom)); z-index: 9300;
+  display: flex; flex-direction: column; overflow: hidden;
+  background: rgba(13,13,13,0.98); border: 1px solid var(--hairline);
+  border-radius: 18px; box-shadow: 0 18px 60px rgba(0,0,0,0.8);
+}
+.live-reader-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px; border-bottom: 1px solid var(--hairline); }
+.live-reader-head button { display: inline-flex; align-items: center; gap: 5px; }
+.live-reader-head svg { width: 15px; height: 15px; }
+.live-reader-body { flex: 1; min-height: 0; overflow-y: auto; padding: 16px; -webkit-overflow-scrolling: touch; }
+.live-history {
+  position: absolute; top: 0; right: 0; bottom: 0; z-index: 9250;
+  width: min(92vw, 420px); display: flex; flex-direction: column;
+  background: rgba(13,13,13,0.98); border-left: 1px solid var(--hairline);
+  box-shadow: -18px 0 50px rgba(0,0,0,0.65); backdrop-filter: blur(12px);
+}
+.live-history-head { display: flex; align-items: center; justify-content: space-between; padding: calc(12px + var(--safe-top)) 14px 12px; border-bottom: 1px solid var(--hairline); }
+.live-history-head b { font-size: 16px; }
+.live-history-head .icon-btn { width: 36px; height: 36px; }
+.live-history-body { flex: 1; min-height: 0; overflow-y: auto; padding: 14px; -webkit-overflow-scrolling: touch; }
+.live-history-msg { margin-bottom: 16px; }
+.live-history-role { color: var(--text-2); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; margin-bottom: 4px; }
+.live-history-msg.user .msg-text { white-space: pre-wrap; color: var(--text); }
+.live-history-empty { color: var(--text-2); font-size: 14px; padding: 20px 4px; }
+.live-keyboard {
+  position: absolute; left: 12px; right: 12px; bottom: calc(156px + var(--safe-bottom)); z-index: 9200;
+  display: flex; align-items: center; gap: 8px; padding: 8px;
+  background: rgba(13,13,13,0.96); border: 1px solid var(--hairline);
+  border-radius: 14px; box-shadow: 0 10px 30px rgba(0,0,0,0.6);
+}
+.live-keyboard input { flex: 1; min-width: 0; color: var(--text); background: var(--surface-2); border: 1px solid var(--hairline); border-radius: 9px; padding: 10px 11px; font-size: 14px; outline: none; }
+.live-keyboard input:focus { border-color: #52525B; }
+.live-keyboard .btn-primary { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; }
+.live-keyboard .btn-primary svg { width: 16px; height: 16px; }
+.live-side-btn.active { background: #FFFFFF; color: #000000; }
+.msg-stats { display: inline-flex; align-items: center; gap: 4px; margin-left: 8px; color: var(--text-2); font-size: 11.5px; white-space: nowrap; }
+.msg-stats svg { width: 13px; height: 13px; }
+.streaming-plain { white-space: pre-wrap; }
+
 .anime-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; padding: 4px 12px 14px; }
 .anime-grid button { background: var(--surface-2); border: 1px solid var(--hairline); border-radius: 12px; padding: 12px 6px; font-size: 13px; font-weight: 600; display: flex; flex-direction: column; align-items: center; gap: 6px; }
 .anime-grid button:active { background: var(--surface-3); }
@@ -483,7 +566,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 22p
 .mt8 { margin-top: 8px; } .mt16 { margin-top: 16px; }
 
 /* ============================================================
-   VANI AI v1.2.0 — Installed section, voice pickers, select fields
+   VANI AI v1.3.0 — Installed section, voice pickers, select fields
    ============================================================ */
 .installed-section { margin-bottom: 18px; }
 .installed-row {

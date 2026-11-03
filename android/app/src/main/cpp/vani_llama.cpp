@@ -4,6 +4,7 @@
 #include <jni.h>
 #include <android/log.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstring>
@@ -35,7 +36,8 @@ struct VaniCtx {
     std::atomic<bool> stop{false};
     std::mutex mtx;
     int n_threads = 4;
-    int n_batch = 256;
+    int n_batch = 512;
+    std::string mmproj_path;                // deferred vision/audio projector
 };
 
 void llama_log_to_android(ggml_log_level level, const char * text, void *) {
@@ -177,11 +179,15 @@ JNIEXPORT jlong JNICALL Java_ai_vani_app_LlmEngine_nativeLoad(
 
     llama_context_params cparams = llama_context_default_params();
     cparams.n_ctx = (uint32_t) nCtx;
+    // v1.3.0 PocketPal-class throughput: 512 logical batch / 256 physical ubatch,
+    // Q8_0 KV cache (halves KV memory bandwidth on big.LITTLE), flash attention.
     cparams.n_batch = (uint32_t) nBatch;
-    cparams.n_ubatch = (uint32_t) nBatch;
+    cparams.n_ubatch = (uint32_t) std::min<int>(nBatch, 256);
     cparams.n_threads = nThreads;
     cparams.n_threads_batch = nThreads;
     cparams.flash_attn_type = flashAttn ? LLAMA_FLASH_ATTN_TYPE_ENABLED : LLAMA_FLASH_ATTN_TYPE_AUTO;
+    cparams.type_k = GGML_TYPE_Q8_0;
+    cparams.type_v = flashAttn ? GGML_TYPE_Q8_0 : GGML_TYPE_F16;
     cparams.embeddings = false;
     cparams.no_perf = true;
 
@@ -196,17 +202,12 @@ JNIEXPORT jlong JNICALL Java_ai_vani_app_LlmEngine_nativeLoad(
     v->n_batch = nBatch;
     v->tmpls = common_chat_templates_init(model, "");
 
-    if (!mmproj.empty()) {
-        mtmd_context_params mp = mtmd_context_params_default();
-        mp.use_gpu = false;
-        mp.n_threads = nThreads;
-        mp.print_timings = false;
-        mp.warmup = false;
-        mp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_AUTO;
-        v->mctx = mtmd_init_from_file(mmproj.c_str(), model, mp);
-        if (!v->mctx) LOGE("mmproj load failed (vision disabled): %s", mmproj.c_str());
-    }
-    LOGI("model ready: ctx=%d threads=%d vision=%d", nCtx, nThreads, v->mctx ? mtmd_support_vision(v->mctx) : 0);
+    // v1.3.0 ON-DEMAND PROJECTOR: the ~480 MB vision/audio mmproj is NOT loaded
+    // into RAM at model load. It is attached only for an image/voice turn and
+    // detached right after, so pure-text chats keep that memory free.
+    if (!mmproj.empty()) v->mmproj_path = mmproj;
+    LOGI("model ready: ctx=%d threads=%d batch=%d mmproj=%s", nCtx, nThreads, nBatch,
+         v->mmproj_path.empty() ? "none" : "on-demand");
     return reinterpret_cast<jlong>(v);
 }
 
@@ -217,8 +218,10 @@ JNIEXPORT jstring JNICALL Java_ai_vani_app_LlmEngine_nativeStatus(JNIEnv * env, 
         j["nCtx"] = (int) llama_n_ctx(v->ctx);
         j["nCtxTrain"] = llama_model_n_ctx_train(v->model);
         j["nThreads"] = v->n_threads;
-        j["vision"] = v->mctx ? mtmd_support_vision(v->mctx) : false;
-        j["audio"] = v->mctx ? mtmd_support_audio(v->mctx) : false;
+        // Capability (projector available on demand) vs. currently resident.
+        j["vision"] = !v->mmproj_path.empty() || (v->mctx && mtmd_support_vision(v->mctx));
+        j["audio"] = !v->mmproj_path.empty() || (v->mctx && mtmd_support_audio(v->mctx));
+        j["mmprojLoaded"] = v->mctx != nullptr;
     }
     return env->NewStringUTF(j.dump().c_str());
 }
@@ -342,11 +345,28 @@ JNIEXPORT void JNICALL Java_ai_vani_app_LlmEngine_nativeGenerate(
         }
 
         // ---- generation loop ----
+        // v1.3.0 ZERO-OVERHEAD STREAMING: tokens are buffered natively and flushed
+        // to the WebView at most every 32 ms (or every 5 tokens), so we never call
+        // evaluateJavascript / re-parse the DOM once per token. TTFT is measured.
         auto t0 = std::chrono::steady_clock::now();
-        std::string full, pending;
+        auto promptDone = std::chrono::steady_clock::now();
+        std::string full, pending, batchBuf;
         size_t emitted = 0;
-        int n_gen = 0;
+        int n_gen = 0, sinceFlush = 0;
         bool stopped = false;
+        double ttftMs = -1;
+        auto lastFlush = std::chrono::steady_clock::now();
+        auto flush = [&](bool force) {
+            if (batchBuf.empty()) { if (force) lastFlush = std::chrono::steady_clock::now(); return; }
+            auto now = std::chrono::steady_clock::now();
+            double ms = std::chrono::duration<double, std::milli>(now - lastFlush).count();
+            if (force || ms >= 32.0 || sinceFlush >= 5) {
+                cb.token(batchBuf);
+                batchBuf.clear();
+                sinceFlush = 0;
+                lastFlush = std::chrono::steady_clock::now();
+            }
+        };
 
         while (n_gen < maxTokens) {
             if (v->stop) { stopped = true; break; }
@@ -355,16 +375,18 @@ JNIEXPORT void JNICALL Java_ai_vani_app_LlmEngine_nativeGenerate(
             common_sampler_accept(smpl, tok, true);
             if (llama_vocab_is_eog(v->vocab, tok)) break;
 
+            if (ttftMs < 0) ttftMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - promptDone).count();
             full += token_piece(v->vocab, tok);
             bool hitStop = false;
             for (const auto & s : stopStrings) {
                 size_t p = full.find(s);
                 if (p != std::string::npos) { full.resize(p); hitStop = true; break; }
             }
-            // Emit only complete UTF-8 (pieces can split multi-byte chars).
+            // Buffer only complete UTF-8 (pieces can split multi-byte chars).
             pending = full.substr(emitted);
             size_t valid = hitStop ? pending.size() : utf8_complete_prefix(pending);
-            if (valid > 0) { cb.token(pending.substr(0, valid)); emitted += valid; }
+            if (valid > 0) { batchBuf += pending.substr(0, valid); emitted += valid; sinceFlush++; }
+            flush(hitStop);
             if (hitStop) break;
 
             n_gen++;
@@ -373,7 +395,8 @@ JNIEXPORT void JNICALL Java_ai_vani_app_LlmEngine_nativeGenerate(
             if (llama_decode(v->ctx, batch) != 0) break;
             n_past++;
         }
-        if (emitted < full.size()) cb.token(full.substr(emitted));
+        if (emitted < full.size()) batchBuf += full.substr(emitted);
+        flush(true); // final partial batch
 
         if (!hasImages) v->prev_tokens = std::move(prompt_tokens);
         common_sampler_free(smpl);
@@ -382,6 +405,7 @@ JNIEXPORT void JNICALL Java_ai_vani_app_LlmEngine_nativeGenerate(
         common_json stats = common_json::object();
         stats["tokens"] = n_gen;
         stats["tps"] = secs > 0 ? n_gen / secs : 0.0;
+        stats["ttftMs"] = ttftMs < 0 ? 0.0 : ttftMs;
         stats["promptTokens"] = (int) n_prompt;
         stats["stopped"] = stopped;
         cb.done(stats.dump());
@@ -396,6 +420,35 @@ JNIEXPORT void JNICALL Java_ai_vani_app_LlmEngine_nativeGenerate(
 JNIEXPORT void JNICALL Java_ai_vani_app_LlmEngine_nativeStop(JNIEnv *, jclass, jlong handle) {
     auto * v = reinterpret_cast<VaniCtx *>(handle);
     if (v) v->stop = true;
+}
+
+// Attach the vision/audio projector for a multimodal turn (on-demand RAM).
+JNIEXPORT jboolean JNICALL Java_ai_vani_app_LlmEngine_nativeAttachMmproj(JNIEnv * env, jclass, jlong handle, jstring jpath) {
+    auto * v = reinterpret_cast<VaniCtx *>(handle);
+    if (!v || !v->model) return JNI_FALSE;
+    std::lock_guard<std::mutex> lock(v->mtx);
+    if (v->mctx) return JNI_TRUE; // already resident
+    std::string path = jstr(env, jpath);
+    if (path.empty()) path = v->mmproj_path;
+    if (path.empty()) return JNI_FALSE;
+    mtmd_context_params mp = mtmd_context_params_default();
+    mp.use_gpu = false;
+    mp.n_threads = v->n_threads;
+    mp.print_timings = false;
+    mp.warmup = false;
+    mp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_AUTO;
+    v->mctx = mtmd_init_from_file(path.c_str(), v->model, mp);
+    if (!v->mctx) { LOGE("mmproj attach failed: %s", path.c_str()); return JNI_FALSE; }
+    LOGI("mmproj attached (vision=%d audio=%d)", mtmd_support_vision(v->mctx), mtmd_support_audio(v->mctx));
+    return JNI_TRUE;
+}
+
+// Detach + free the projector after a multimodal turn (returns ~480 MB RAM).
+JNIEXPORT void JNICALL Java_ai_vani_app_LlmEngine_nativeDetachMmproj(JNIEnv *, jclass, jlong handle) {
+    auto * v = reinterpret_cast<VaniCtx *>(handle);
+    if (!v) return;
+    std::lock_guard<std::mutex> lock(v->mtx);
+    if (v->mctx) { mtmd_free(v->mctx); v->mctx = nullptr; LOGI("mmproj detached (RAM freed)"); }
 }
 
 JNIEXPORT void JNICALL Java_ai_vani_app_LlmEngine_nativeFree(JNIEnv *, jclass, jlong handle) {

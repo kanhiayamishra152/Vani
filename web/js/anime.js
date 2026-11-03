@@ -5,28 +5,41 @@
 // Triggered ONLY by /anime commands — never randomly.
 
 const Z = { t: 0 };
+
+// v1.3.0 EMPIRICAL AXIS SIGNS — measured in world space by
+// avatar.calibrateHumanoidAxes() on load (VRM 0.x vs 1.0 inversions). Each map
+// entry says "this bone's local <axis> rotation means <semantic direction>";
+// sampleAction multiplies the offset by the verified sign so a bow ALWAYS bends
+// forward (+Z toward the user) and knees ALWAYS bend backward, on any rig.
+export const AXES = { pitch: 1, knee: 1, leg: 1, armFwd: 1 };
+export function setAxes(a) { Object.assign(AXES, a); }
+const SIGN_MAP = {
+  spine: { x: 'pitch' }, chest: { x: 'pitch' }, neck: { x: 'pitch' }, head: { x: 'pitch' },
+  leftLowerLeg: { x: 'knee' }, rightLowerLeg: { x: 'knee' },
+  leftUpperLeg: { x: 'leg' }, rightUpperLeg: { x: 'leg' },
+  leftFoot: { x: 'leg' }, rightFoot: { x: 'leg' },
+  leftUpperArm: { x: 'armFwd' }, rightUpperArm: { x: 'armFwd' },
+};
+
 export const ANIME_DEFS = {
+  // namaste: arms are driven by the world-space IK solver (avatar.ikPoses.namaste)
+  // so both palms physically meet in front of the sternum (< 0.04 m). The tracks
+  // below only add the gentle ~15° forward head/torso bow + warm expression.
   namaste: {
     duration: 3.0,
     bones: {
-      leftUpperArm:  [{ t: 0 }, { t: 0.28, z: -0.72, y: -0.55 }, { t: 0.72, z: -0.72, y: -0.55 }, { t: 1 }],
-      rightUpperArm: [{ t: 0 }, { t: 0.28, z: 0.72, y: 0.55 }, { t: 0.72, z: 0.72, y: 0.55 }, { t: 1 }],
-      leftLowerArm:  [{ t: 0 }, { t: 0.28, z: 1.45 }, { t: 0.72, z: 1.45 }, { t: 1 }],
-      rightLowerArm: [{ t: 0 }, { t: 0.28, z: -1.45 }, { t: 0.72, z: -1.45 }, { t: 1 }],
-      leftHand:      [{ t: 0 }, { t: 0.3, z: 0.25 }, { t: 0.7, z: 0.25 }, { t: 1 }],
-      rightHand:     [{ t: 0 }, { t: 0.3, z: -0.25 }, { t: 0.7, z: -0.25 }, { t: 1 }],
-      spine:         [{ t: 0 }, { t: 0.32, x: 0.1 }, { t: 0.5, x: 0.24 }, { t: 0.68, x: 0.1 }, { t: 1 }],
-      head:          [{ t: 0 }, { t: 0.32, x: 0.08 }, { t: 0.5, x: 0.18 }, { t: 0.68, x: 0.08 }, { t: 1 }],
+      spine: [{ t: 0 }, { t: 0.32, x: 0.08 }, { t: 0.5, x: 0.16 }, { t: 0.68, x: 0.08 }, { t: 1 }],
+      head:  [{ t: 0 }, { t: 0.32, x: 0.06 }, { t: 0.5, x: 0.13 }, { t: 0.68, x: 0.06 }, { t: 1 }],
     },
     expr: [{ t: 0 }, { t: 0.3, values: { happy: 0.65 } }, { t: 0.75, values: { happy: 0.65 } }, { t: 1 }],
   },
+  // wave: the right arm is raised to head height by the IK solver
+  // (avatar.ikPoses.wave) and the wrist/forearm oscillates ±22° @ 3.5 Hz in
+  // avatar.update(). Tracks below add a cheerful head tilt + smile.
   wave: {
     duration: 2.3,
     bones: {
-      rightUpperArm: [{ t: 0 }, { t: 0.22, z: 1.12, y: 0.18 }, { t: 0.8, z: 1.12, y: 0.18 }, { t: 1 }],
-      rightLowerArm: [{ t: 0 }, { t: 0.22, z: 0.45 }, { t: 0.36, z: 0.95 }, { t: 0.5, z: 0.35 }, { t: 0.64, z: 0.95 }, { t: 0.8, z: 0.45 }, { t: 1 }],
-      rightHand:     [{ t: 0 }, { t: 0.3, z: 0.25 }, { t: 0.44, z: -0.2 }, { t: 0.58, z: 0.25 }, { t: 0.72, z: -0.2 }, { t: 1 }],
-      head:          [{ t: 0 }, { t: 0.25, z: 0.07 }, { t: 0.8, z: 0.07 }, { t: 1 }],
+      head: [{ t: 0 }, { t: 0.25, z: 0.07 }, { t: 0.8, z: 0.07 }, { t: 1 }],
     },
     expr: [{ t: 0 }, { t: 0.2, values: { happy: 0.75 } }, { t: 0.85, values: { happy: 0.75 } }, { t: 1 }],
   },
@@ -173,7 +186,17 @@ export function sampleAction(name, p) {
   const def = ANIME_DEFS[name];
   if (!def) return null;
   const bones = {};
-  for (const [bone, track] of Object.entries(def.bones || {})) bones[bone] = sampleTrack(track, p);
+  for (const [bone, track] of Object.entries(def.bones || {})) {
+    const off = sampleTrack(track, p);
+    // Apply the empirically-verified world-space sign for this bone/axis.
+    const map = SIGN_MAP[bone];
+    if (map && off) {
+      for (const [axis, key] of Object.entries(map)) {
+        if (off[axis]) off[axis] *= AXES[key];
+      }
+    }
+    bones[bone] = off;
+  }
   return {
     duration: def.duration,
     bones,

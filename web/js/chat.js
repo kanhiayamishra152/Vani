@@ -15,6 +15,32 @@ let activeGen = null;         // { genId, stop }
 let streamingMsgId = null;
 let dictating = false;
 
+/** Stable key for the loaded model (per-model thinking preference is keyed by it). */
+function currentModelKey() {
+  return llm.info?.name || llm.info?.modelPath || 'default';
+}
+
+/** Reflect the active model's thinking state on the composer triangle toggle. */
+function updateThinkToggle() {
+  const btn = $('#btn-think');
+  if (!btn) return;
+  const on = store.getModelThinking(currentModelKey());
+  btn.classList.toggle('on', on);
+  btn.setAttribute('aria-pressed', String(on));
+  btn.setAttribute('aria-label', on ? 'Thinking on — tap to turn off' : 'Thinking off — tap to turn on');
+  btn.title = on ? 'Thinking: ON' : 'Thinking: OFF';
+  const lbl = btn.querySelector('.think-label');
+  if (lbl) lbl.textContent = on ? 'Think' : 'Think';
+}
+
+function toggleThinking() {
+  const key = currentModelKey();
+  const next = !store.getModelThinking(key);
+  store.setModelThinking(key, next);
+  updateThinkToggle();
+  toast(next ? 'Thinking ON for this model' : 'Thinking OFF — direct answers');
+}
+
 /* ============================ rendering ============================ */
 export function renderChat() {
   const list = $('#chat-list');
@@ -67,7 +93,7 @@ function renderMessage(m) {
     const { reasoning, content } = splitReasoning(m.content || '');
     if (reasoning && store.settings.showReasoning) {
       const d = el('details', 'reasoning');
-      d.innerHTML = `<summary>${icon('sparkles')}<span>Reasoning</span></summary><div class="reasoning-body">${esc(reasoning)}</div>`;
+      d.innerHTML = `<summary><span class="reasoning-tri">${icon('chevronRight')}</span>${icon('sparkles')}<span>Thinking</span></summary><div class="reasoning-body">${esc(reasoning)}</div>`;
       wrap.appendChild(d);
     }
     const body = el('div', 'msg-text');
@@ -80,6 +106,14 @@ function renderMessage(m) {
       copy.setAttribute('aria-label', 'Copy message');
       copy.addEventListener('click', async () => { (await copyText(content)) ? toast('Copied') : toast('Copy failed'); });
       actions.appendChild(copy);
+      // v1.3.0 live speed badge: verify PocketPal-class throughput at a glance.
+      if (m.stats && m.stats.tps > 0) {
+        const badge = el('span', 'msg-stats');
+        const tps = m.stats.tps.toFixed(1);
+        const ttft = m.stats.ttftMs > 0 ? ` • TTFT ${Math.round(m.stats.ttftMs)}ms` : '';
+        badge.innerHTML = `${icon('bolt')}<span>${tps} tok/s${ttft}</span>`;
+        actions.appendChild(badge);
+      }
       wrap.appendChild(actions);
     }
   }
@@ -127,36 +161,48 @@ export async function sendChat(rawText) {
   updateComposerState();
 
   const history = t.messages.filter(m => m.id !== assistant.id);
-  const messages = buildContextMessages(history, store.activePrompt().text, store.settings.maxTokens);
+  // Per-model thinking control: when OFF, steer the model to answer directly
+  // (portable across templates) in addition to the native enable_thinking flag.
+  const thinkOn = store.getModelThinking(currentModelKey());
+  let sysText = store.activePrompt().text;
+  if (!thinkOn) sysText += '\n\nRespond directly with the final answer only. Do not show step-by-step reasoning and do not use  tags.';
+  const messages = buildContextMessages(history, sysText, store.settings.maxTokens);
   // Attach images to the final user turn for vision models.
   if (images.length) messages[messages.length - 1].hasImages = true;
 
   let raw = '';
+  // v1.3.0 ZERO-OVERHEAD STREAMING: native batches tokens (~32 ms flush); here we
+  // only touch the active node's textContent during generation — NO per-token
+  // markdown/KaTeX re-parse and NO per-flush localStorage write. Full render +
+  // the tok/s badge happen once when the reply completes.
   const paint = throttle(() => {
-    store.updateMessage(assistant.id, { content: raw });
     const node = $$('#chat-list .msg.assistant').pop();
     if (node) {
       const { reasoning, content } = splitReasoning(raw);
       const body = node.querySelector('.msg-text');
-      if (body) body.innerHTML = content ? renderMarkdown(content) : '<div class="typing-dots"><i></i><i></i><i></i></div>';
+      if (body) {
+        if (content) { body.textContent = content; body.classList.add('streaming-plain'); }
+        else body.innerHTML = '<div class="typing-dots"><i></i><i></i><i></i></div>';
+      }
       let det = node.querySelector('.reasoning');
       if (reasoning && store.settings.showReasoning) {
         if (!det) {
           det = el('details', 'reasoning');
-          det.innerHTML = `<summary>${icon('sparkles')}<span>Reasoning</span></summary><div class="reasoning-body"></div>`;
+          det.innerHTML = `<summary><span class="reasoning-tri">${icon('chevronRight')}</span>${icon('sparkles')}<span>Thinking</span></summary><div class="reasoning-body"></div>`;
           node.insertBefore(det, body);
         }
         det.querySelector('.reasoning-body').textContent = reasoning;
       }
       scrollBottom(false);
     }
-  }, 90);
+  }, 32);
 
   activeGen = generate({
-    messages, images,
+    messages, images, thinking: thinkOn,
     onToken: tok => { raw += tok; paint(); },
-    onDone: () => {
-      store.updateMessage(assistant.id, { content: raw });
+    onDone: stats => {
+      const telemetry = stats && stats.tokens ? { tps: stats.tps, ttftMs: stats.ttftMs, tokens: stats.tokens } : null;
+      store.updateMessage(assistant.id, { content: raw, stats: telemetry });
       activeGen = null; streamingMsgId = null;
       renderChat(); updateComposerState();
     },
@@ -318,7 +364,7 @@ function renderDrawer() {
     <div class="drawer-foot">
       <button class="drawer-foot-item" id="drawer-prompts">${icon('sparkles')}<span>System Prompt Studio</span></button>
       <button class="drawer-foot-item" id="drawer-models">${icon('box')}<span>Model Hub</span></button>
-      <div class="drawer-version">Vani AI v1.2.0 · on-device</div>
+      <div class="drawer-version">Vani AI v1.3.0 · on-device</div>
     </div>`;
   $('#drawer-new').addEventListener('click', () => { store.newThread(); closeDrawer(); renderChat(); });
   $('#drawer-prompts').addEventListener('click', () => { closeDrawer(); openPromptStudio(); });
@@ -379,6 +425,13 @@ export function initChat() {
   $('#btn-send').innerHTML = icon('arrowUp');
   $('#btn-stop').innerHTML = icon('stop');
   $('#btn-live').innerHTML = icon('waveform');
+  // Per-model thinking triangle toggle.
+  const thinkBtn = $('#btn-think');
+  if (thinkBtn) {
+    thinkBtn.innerHTML = `<span class="think-tri">${icon('chevronRight')}</span><span class="think-label">Think</span>`;
+    thinkBtn.addEventListener('click', toggleThinking);
+    updateThinkToggle();
+  }
 
   $('#btn-menu').addEventListener('click', openDrawer);
   $('#drawer-scrim').addEventListener('click', closeDrawer);
@@ -438,7 +491,8 @@ export function initChat() {
   });
 
   on('threads.changed', () => { if (!activeGen) renderChat(); if (drawerOpen()) renderDrawer(); });
-  on('llm.statusChanged', () => { if (!activeGen) renderChat(); });
+  on('llm.statusChanged', () => { updateThinkToggle(); if (!activeGen) renderChat(); });
+  on('modelThinking.changed', () => updateThinkToggle());
   on('settings.changed', p => { if (p.key === 'showReasoning' && !activeGen) renderChat(); });
   on('live.transcript', () => { if (!activeGen) renderChat(); });
 
