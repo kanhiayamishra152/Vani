@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       publish_release:
-        description: "Publish GitHub Release v1.0.1"
+        description: "Publish GitHub Release (v1.0.1-build2)"
         type: boolean
         default: true
 
@@ -17,6 +17,10 @@ permissions:
   issues: write
 
 env:
+  # Release tag. NOTE: the original "v1.0.1" tag was permanently burned when an
+  # empty immutable release was deleted (GitHub forbids reusing an immutable
+  # release's tag). The APK itself is versionName 1.0.1 / versionCode 2.
+  RELEASE_TAG: "v1.0.1-build2"
   NODE_VERSION: "20"
   GRADLE_VERSION: "8.7"
   ANDROID_PLATFORM: "34"
@@ -204,16 +208,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         run: |
-          # If v1.0.1 already exists (it may be immutable), mirror ITS exact
-          # assets so the gofile links + hashes match the published release.
-          if gh release view v1.0.1 --repo "$REPO" >/dev/null 2>&1; then
-            gh release download v1.0.1 --repo "$REPO" \
+          # If the release already exists (immutable), mirror ITS exact assets so
+          # the gofile links + hashes match the published release; otherwise
+          # upload the freshly built dist assets.
+          if gh release view "$RELEASE_TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release download "$RELEASE_TAG" --repo "$REPO" \
               -p 'vani-ai-1.0.1-release.apk' -p 'vani-ai-1.0.1-source.zip' -p 'SHA256SUMS.txt' \
               -D dist --clobber || true
           fi
           bash scripts/upload-gofile.sh
 
-      - name: Publish / refresh Release v1.0.1 (immutability-aware)
+      - name: Publish Release (immutable-safe, assets attached at creation)
         if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_release)
         env:
           GH_TOKEN: ${{ github.token }}
@@ -232,21 +237,32 @@ jobs:
           else
             printf '\n_Mirrors: gofile.io upload unavailable for this run._\n' >> /tmp/body.md
           fi
-          if ! gh release view v1.0.1 --repo "$REPO" >/dev/null 2>&1; then
-            # Fresh release: create + upload assets.
-            gh release create v1.0.1 --repo "$REPO" --target "$GITHUB_SHA" \
-              --title "Vani AI v1.0.1" --notes-file /tmp/body.md --latest
-            gh release upload v1.0.1 --repo "$REPO" \
-              dist/vani-ai-1.0.1-release.apk dist/vani-ai-1.0.1-source.zip dist/SHA256SUMS.txt --clobber
+
+          ASSETS=(dist/vani-ai-1.0.1-release.apk dist/vani-ai-1.0.1-source.zip dist/SHA256SUMS.txt)
+
+          if ! gh release view "$RELEASE_TAG" --repo "$REPO" >/dev/null 2>&1; then
+            # Immutable-safe: passing files to `gh release create` makes it create
+            # a DRAFT, upload the assets, then publish — so assets are attached
+            # before the release seals. (Create-empty-then-upload is rejected 422.)
+            # NEVER delete an immutable release to retry: that burns the tag name.
+            gh release create "$RELEASE_TAG" --repo "$REPO" --target "$GITHUB_SHA" \
+              --title "Vani AI v1.0.1" --notes-file /tmp/body.md --latest "${ASSETS[@]}"
           else
-            # Existing release: refresh body (always allowed). Asset re-upload
-            # is best-effort — immutable releases keep their published assets.
-            gh release edit v1.0.1 --repo "$REPO" --title "Vani AI v1.0.1" --notes-file /tmp/body.md --latest
-            if gh release upload v1.0.1 --repo "$REPO" \
-                dist/vani-ai-1.0.1-release.apk dist/vani-ai-1.0.1-source.zip dist/SHA256SUMS.txt --clobber; then
-              echo "Assets refreshed."
+            COUNT=$(gh release view "$RELEASE_TAG" --repo "$REPO" --json assets --jq '.assets | length')
+            if [ "$COUNT" -ge 3 ]; then
+              # Already published with assets: only title/notes may be refreshed.
+              gh release edit "$RELEASE_TAG" --repo "$REPO" --title "Vani AI v1.0.1" --notes-file /tmp/body.md --latest
             else
-              echo "Release is immutable — keeping published assets; body refreshed with hashes + mirrors."
+              echo "ERROR: $RELEASE_TAG exists with only $COUNT assets and is immutable; cannot add assets or reuse the tag. Bump RELEASE_TAG." >&2
+              exit 1
             fi
           fi
-          echo "Release v1.0.1 finalized."
+
+          # Verify the assets are attached.
+          COUNT=$(gh release view "$RELEASE_TAG" --repo "$REPO" --json assets --jq '.assets | length')
+          echo "Release $RELEASE_TAG assets: $COUNT"
+          if [ "$COUNT" -lt 3 ]; then
+            echo "ERROR: expected 3 assets, got $COUNT" >&2
+            exit 1
+          fi
+          echo "Release $RELEASE_TAG finalized."
