@@ -165,7 +165,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         run: |
-          if [ -f /tmp/vani-tests.log ]; then
+          if [ -f /tmp/gradle.log ]; then
+            {
+              echo "## Gradle failure (run ${{ github.run_id }})";
+              echo '```';
+              grep -nE "error:|e: |FAILED|What went wrong|Caused by|Execution failed|> Task|CMake Error|ninja:|undefined reference|fatal error" /tmp/gradle.log | tail -n 120;
+              echo "----- tail -----";
+              tail -n 80 /tmp/gradle.log;
+              echo '```';
+            } > /tmp/diag.md
+          elif [ -f /tmp/vani-tests.log ]; then
             {
               echo "## Test failure (run ${{ github.run_id }})";
               echo '```';
@@ -173,15 +182,6 @@ jobs:
               head -n 180 /tmp/vani-tests.log;
               echo '----- end -----';
               tail -n 220 /tmp/vani-tests.log;
-              echo '```';
-            } > /tmp/diag.md
-          elif [ -f /tmp/gradle.log ]; then
-            {
-              echo "## Gradle failure (run ${{ github.run_id }})";
-              echo '```';
-              grep -nE "error:|e: |FAILED|What went wrong|Caused by|Execution failed|> Task|CMake Error|ninja:|undefined reference|fatal error" /tmp/gradle.log | tail -n 120;
-              echo "----- tail -----";
-              tail -n 80 /tmp/gradle.log;
               echo '```';
             } > /tmp/diag.md
           else
