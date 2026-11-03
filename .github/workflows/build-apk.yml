@@ -202,23 +202,6 @@ jobs:
         continue-on-error: true
         run: bash scripts/upload-gofile.sh dist/vani-ai-1.0.0-release.apk dist/vani-ai-1.0.0-source.zip
 
-      - name: Append mirror links to Release
-        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_release)
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-        run: |
-          if [ -s dist/gofile-links.txt ]; then
-            ID=$(gh api "repos/$REPO/releases/tags/v1.0.0" --jq '.id')
-            gh api "repos/$REPO/releases/$ID" --jq '.body' > /tmp/body.md
-            printf '\n\n### Mirrors (gofile.io)\n' >> /tmp/body.md
-            cat dist/gofile-links.txt >> /tmp/body.md
-            gh api -X PATCH "repos/$REPO/releases/$ID" -F body=@/tmp/body.md >/dev/null && echo "mirror links appended to release"
-          else
-            echo "no gofile mirrors to append"
-          fi
-
       - name: Publish GitHub Release v1.0.0
         if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_release)
         uses: softprops/action-gh-release@v2
@@ -226,7 +209,7 @@ jobs:
           tag_name: v1.0.0
           name: Vani AI v1.0.0
           make_latest: "true"
-          generate_release_notes: true
+          generate_release_notes: false
           files: |
             dist/vani-ai-1.0.0-release.apk
             dist/vani-ai-1.0.0-source.zip
@@ -243,4 +226,22 @@ jobs:
             - Model Hub with resumable native downloads (HTTP Range) and notifications
             - Pure monochrome design, zero cloud dependencies
 
-            See `SHA256SUMS.txt` for integrity hashes.
+      - name: Append mirrors + hashes to Release
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_release)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          ID=$(gh api "repos/$REPO/releases/tags/v1.0.0" --jq '.id')
+          gh api "repos/$REPO/releases/$ID" --jq '.body' > /tmp/body.md
+          printf '\n\n### SHA-256\n```\n' >> /tmp/body.md
+          cat dist/SHA256SUMS.txt >> /tmp/body.md
+          printf '```\n' >> /tmp/body.md
+          if [ -s dist/gofile-links.txt ]; then
+            printf '\n### Mirrors (gofile.io)\n' >> /tmp/body.md
+            cat dist/gofile-links.txt >> /tmp/body.md
+          else
+            printf '\n_Mirrors: gofile.io upload unavailable for this run._\n' >> /tmp/body.md
+          fi
+          gh api -X PATCH "repos/$REPO/releases/$ID" -F body=@/tmp/body.md >/dev/null && echo "release body updated with hashes + mirrors"
