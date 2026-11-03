@@ -32,7 +32,7 @@ public final class Bridge {
     }
 
     private void ok(String id, JSONObject payload) { act.resolve(id, true, payload == null ? "{}" : payload.toString()); }
-    private void ok(String id, org.json.JSONArray payload) { act.resolve(id, true, payload == null ? "[]" : payload.toString()); }
+    private void okArr(String id, org.json.JSONArray payload) { act.resolve(id, true, payload == null ? "[]" : payload.toString()); }
     private void err(String id, String msg) {
         try { act.resolve(id, false, new JSONObject().put("error", msg).toString()); }
         catch (Exception e) { act.resolve(id, false, "{\"error\":\"unknown\"}"); }
@@ -42,7 +42,7 @@ public final class Bridge {
         switch (m) {
             case "device.info": ok(id, DeviceInfo.get(act)); break;
 
-            case "downloads.list": ok(id, Downloads.list(act)); break;
+            case "downloads.list": okArr(id, Downloads.list(act)); break;
             case "downloads.start":
                 act.requestNotifPermission();
                 DownloadService.start(act, a);
@@ -52,7 +52,7 @@ public final class Bridge {
             case "downloads.resume": DownloadService.command(act, DownloadService.ACTION_RESUME, a.getString("id")); ok(id, null); break;
             case "downloads.cancel": DownloadService.command(act, DownloadService.ACTION_CANCEL, a.getString("id")); ok(id, null); break;
 
-            case "models.list": ok(id, Models.list(act)); break;
+            case "models.list": okArr(id, Models.list(act)); break;
             case "models.delete":
                 Models.delete(act, a.getString("id"));
                 act.emit("models.changed", "{}");

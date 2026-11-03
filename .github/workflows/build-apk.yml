@@ -182,6 +182,23 @@ jobs:
         continue-on-error: true
         run: bash scripts/upload-gofile.sh dist/vani-ai-1.0.0-release.apk dist/vani-ai-1.0.0-source.zip
 
+      - name: Append mirror links to Release
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_release)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          if [ -s dist/gofile-links.txt ]; then
+            ID=$(gh api "repos/$REPO/releases/tags/v1.0.0" --jq '.id')
+            gh api "repos/$REPO/releases/$ID" --jq '.body' > /tmp/body.md
+            printf '\n\n### Mirrors (gofile.io)\n' >> /tmp/body.md
+            cat dist/gofile-links.txt >> /tmp/body.md
+            gh api -X PATCH "repos/$REPO/releases/$ID" -F body=@/tmp/body.md >/dev/null && echo "mirror links appended to release"
+          else
+            echo "no gofile mirrors to append"
+          fi
+
       - name: Publish GitHub Release v1.0.0
         if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_release)
         uses: softprops/action-gh-release@v2
