@@ -150,10 +150,28 @@ jobs:
         run: |
           mkdir -p dist
           BT="$ANDROID_HOME/build-tools/${ANDROID_BUILD_TOOLS}"
+          if [ ! -x "$BT/zipalign" ]; then
+            BT=$(dirname "$(find "$ANDROID_HOME/build-tools" -name zipalign 2>/dev/null | sort -V | tail -1)")
+          fi
           RAW=$(find android/app/build/outputs/apk/release -name '*.apk' | head -1)
-          "$BT/zipalign" -f -p 4 "$RAW" dist/vani-ai-1.0.0-release.apk
-          "$BT/apksigner" verify --print-certs dist/vani-ai-1.0.0-release.apk
-          ls -lh dist/vani-ai-1.0.0-release.apk
+          OUT=dist/vani-ai-1.0.0-release.apk
+          echo "RAW=$RAW"; echo "BT=$BT"
+          cp "$RAW" "$OUT"
+          # AGP already zipaligns + signs. Verify alignment non-destructively;
+          # re-aligning a signed APK would break its v2/v3 signature, so only
+          # re-align + re-sign if the check actually fails.
+          if "$BT/zipalign" -c -p 4 "$OUT"; then
+            echo "APK is 4-byte aligned (AGP)"
+          else
+            echo "Re-aligning + re-signing"
+            "$BT/zipalign" -f -p 4 "$RAW" "$OUT"
+            SP=$(grep '^storePassword=' android/keystore.properties | cut -d= -f2-)
+            KP=$(grep '^keyPassword=' android/keystore.properties | cut -d= -f2-)
+            AL=$(grep '^keyAlias=' android/keystore.properties | cut -d= -f2-)
+            "$BT/apksigner" sign --ks android/vani-v1.jks --ks-key-alias "$AL" --ks-pass "pass:$SP" --key-pass "pass:$KP" "$OUT"
+          fi
+          "$BT/apksigner" verify --print-certs "$OUT"
+          ls -lh "$OUT"
 
       - name: Package source ZIP
         run: bash scripts/make-source-zip.sh
