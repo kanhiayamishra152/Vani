@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- Vani AI — acoustic prism on matte-black squircle -->
+  <rect x="0" y="0" width="512" height="512" rx="116" fill="#000000"/>
+  <path fill="#FFFFFF" fill-rule="evenodd" d="M256 108 L404 390 L108 390 Z M196 302 h26 v88 h-26 Z M243 254 h26 v136 h-26 Z M290 302 h26 v88 h-26 Z"/>
+</svg>

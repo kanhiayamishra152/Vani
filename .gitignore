@@ -1,0 +1,27 @@
+# Dependencies / vendored sources (fetched by scripts, never committed)
+node_modules/
+third_party/
+
+# Build outputs
+dist/
+android/.gradle/
+android/build/
+android/app/build/
+android/app/.cxx/
+android/local.properties
+
+# Fetched binary assets (CI / build scripts regenerate these)
+android/app/libs/*.aar
+android/app/src/main/assets/www/
+android/app/src/main/assets/vad/
+assets/vrm/
+
+# Signing material — NEVER commit keystores or passwords
+*.jks
+*.keystore
+keystore.properties
+android/keystore.properties
+
+# Scratch / OS noise
+*.log
+.DS_Store
