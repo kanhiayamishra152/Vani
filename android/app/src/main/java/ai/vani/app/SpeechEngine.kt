@@ -161,7 +161,7 @@ class SpeechEngine(
         return try {
             val modelConfig = when (engine) {
                 "vits" -> {
-                    val model = pick(dir, ".onnx", needles = arrayOf(".onnx"))
+                    val model = pick(dir, ".onnx")
                     val tokens = File(dir, "tokens.txt")
                     if (model.isEmpty() || !tokens.exists()) return null
                     OfflineTtsModelConfig(
