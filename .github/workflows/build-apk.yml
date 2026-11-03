@@ -210,7 +210,8 @@ jobs:
           grep -F "sdkVersion:'26'" /tmp/vani-badging.txt
           grep -F "targetSdkVersion:'34'" /tmp/vani-badging.txt
           grep -F "native-code: 'arm64-v8a'" /tmp/vani-badging.txt
-          grep -E 'android:extractNativeLibs.*=true' /tmp/vani-manifest.txt
+          # aapt prints binary XML booleans as 0xffffffff (some versions use true).
+          grep -E 'android:extractNativeLibs.*(=true|0xffffffff)' /tmp/vani-manifest.txt
 
           # JNI libraries must use traditional compressed/extractable packaging;
           # the original VRM must remain byte-identical and STORED for WebView mmap.
