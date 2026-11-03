@@ -185,20 +185,18 @@ jobs:
           RAW=$(find android/app/build/outputs/apk/release -name '*.apk' | head -1)
           OUT=dist/vani-ai-1.5.1-release.apk
           echo "RAW=$RAW"; echo "BT=$BT"
-          cp "$RAW" "$OUT"
-          if "$BT/zipalign" -c -p 4 "$OUT"; then
-            echo "APK is 4-byte aligned (AGP)"
-          else
-            echo "Re-aligning + re-signing with the tracked v1 key"
-            "$BT/zipalign" -f -p 4 "$RAW" "$OUT"
-            SP=$(grep '^storePassword=' android/keystore.properties | cut -d= -f2-)
-            KP=$(grep '^keyPassword=' android/keystore.properties | cut -d= -f2-)
-            AL=$(grep '^keyAlias=' android/keystore.properties | cut -d= -f2-)
-            "$BT/apksigner" sign --ks android/vani-v1.jks --ks-key-alias "$AL" \
-              --ks-pass "pass:$SP" --key-pass "pass:$KP" \
-              --v1-signing-enabled true --v2-signing-enabled true \
-              --v3-signing-enabled false --v4-signing-enabled false "$OUT"
-          fi
+          # Canonical release packaging: align first, then force both signatures.
+          # AGP can emit v2-only APKs for minSdk 26 even when v1 is requested.
+          ALIGNED=/tmp/vani-ai-1.5.1-aligned.apk
+          "$BT/zipalign" -f -p 4 "$RAW" "$ALIGNED"
+          SP=$(grep '^storePassword=' android/keystore.properties | cut -d= -f2-)
+          KP=$(grep '^keyPassword=' android/keystore.properties | cut -d= -f2-)
+          AL=$(grep '^keyAlias=' android/keystore.properties | cut -d= -f2-)
+          "$BT/apksigner" sign --ks android/vani-v1.jks --ks-key-alias "$AL" \
+            --ks-pass "pass:$SP" --key-pass "pass:$KP" \
+            --v1-signing-enabled true --v2-signing-enabled true \
+            --v3-signing-enabled false --v4-signing-enabled false \
+            --out "$OUT" "$ALIGNED"
           "$BT/zipalign" -c -p 4 "$OUT"
           unzip -t "$OUT" > /tmp/vani-apk-zip-test.log
 

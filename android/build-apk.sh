@@ -82,15 +82,24 @@ if [ -n "$SDK" ] && [ -n "$GRADLE" ]; then
   RAW=$(find android/app/build/outputs/apk/release -name '*.apk' | head -1)
   if [ -n "$RAW" ]; then
     if [ -n "$BT" ]; then
-      "$BT/zipalign" -f -p 4 "$RAW" "$DIST/vani-ai-1.5.1-release.apk"
-      if "$BT/apksigner" verify --print-certs "$DIST/vani-ai-1.5.1-release.apk" >/dev/null 2>&1; then
-        echo "APK aligned + signature verified"
-      else
-        cp "$RAW" "$DIST/vani-ai-1.5.1-release.apk"
-        echo "WARN: apksigner verify failed; copied raw APK"
-      fi
+      OUT="$DIST/vani-ai-1.5.1-release.apk"
+      ALIGNED="$DIST/.vani-ai-1.5.1-aligned.apk"
+      "$BT/zipalign" -f -p 4 "$RAW" "$ALIGNED"
+      SP=$(grep '^storePassword=' android/keystore.properties | cut -d= -f2-)
+      KP=$(grep '^keyPassword=' android/keystore.properties | cut -d= -f2-)
+      AL=$(grep '^keyAlias=' android/keystore.properties | cut -d= -f2-)
+      "$BT/apksigner" sign --ks android/vani-v1.jks --ks-key-alias "$AL" \
+        --ks-pass "pass:$SP" --key-pass "pass:$KP" \
+        --v1-signing-enabled true --v2-signing-enabled true \
+        --v3-signing-enabled false --v4-signing-enabled false \
+        --out "$OUT" "$ALIGNED"
+      rm -f "$ALIGNED"
+      "$BT/zipalign" -c -p 4 "$OUT"
+      "$BT/apksigner" verify --verbose --print-certs "$OUT"
+      echo "APK aligned; v1 + v2 signatures verified"
     else
       cp "$RAW" "$DIST/vani-ai-1.5.1-release.apk"
+      echo "WARN: Android build-tools not found; copied the AGP-signed APK"
     fi
     APK_OUT="$DIST/vani-ai-1.5.1-release.apk"
   fi
