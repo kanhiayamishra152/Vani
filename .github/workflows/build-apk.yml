@@ -102,17 +102,19 @@ jobs:
         run: |
           if [ -n "$KEYSTORE_BASE64" ]; then
             echo "$KEYSTORE_BASE64" | base64 -d > android/vani-v1.jks
+            cat > android/keystore.properties <<EOF
+          storeFile=vani-v1.jks
+          storePassword=${VANI_STORE_PASSWORD:?KEYSTORE_PASSWORD secret required with KEYSTORE_BASE64}
+          keyAlias=${VANI_KEY_ALIAS:-vani-v1}
+          keyPassword=${VANI_KEY_PASSWORD:-$VANI_STORE_PASSWORD}
+          EOF
             echo "Using keystore from repository secret"
           else
+            # gen-keystore.sh creates the JKS AND a matching keystore.properties
+            # (random password when no secret is set). Do not overwrite it.
             bash scripts/gen-keystore.sh
             echo "Generated fresh v1 keystore"
           fi
-          cat > android/keystore.properties <<EOF
-          storeFile=vani-v1.jks
-          storePassword=${VANI_STORE_PASSWORD:-vani-v1-release}
-          keyAlias=${VANI_KEY_ALIAS:-vani-v1}
-          keyPassword=${VANI_KEY_PASSWORD:-vani-v1-release}
-          EOF
 
       - name: Assemble release APK
         working-directory: android
