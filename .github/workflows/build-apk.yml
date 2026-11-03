@@ -135,14 +135,20 @@ jobs:
           EOF
             echo "Using keystore from repository secret"
           else
-            if [ "${GITHUB_EVENT_NAME}" != "pull_request" ]; then
-              echo "ERROR: KEYSTORE_BASE64 is required for a publishable v1.3.0 build; refusing a new incompatible signing key." >&2
+            if [ -f android/vani-v1.jks ] && [ -f android/keystore.properties ]; then
+              # The established v1 key is persisted in the checkout. Reuse it;
+              # never generate a replacement for a publishable update.
+              bash scripts/gen-keystore.sh
+              echo "Using the persisted repository v1 keystore"
+            elif [ "${GITHUB_EVENT_NAME}" != "pull_request" ]; then
+              echo "ERROR: no persisted v1 keystore or KEYSTORE_BASE64; refusing a new incompatible signing key." >&2
               exit 1
+            else
+              # PR-only compile checks may use a disposable key; nothing from a
+              # PR is published as an in-place update.
+              bash scripts/gen-keystore.sh
+              echo "Using a disposable PR-only key (release signing secret absent)"
             fi
-            # PR-only compile checks may use a disposable key; nothing from a
-            # PR is published as an in-place update.
-            bash scripts/gen-keystore.sh
-            echo "Using a disposable PR-only key (release signing secret absent)"
           fi
 
       - name: Assemble release APK
