@@ -1,31 +1,25 @@
-## Vani AI v1.5.0 — native streaming and model-memory hardening
+## Vani AI v1.5.1 — installer compatibility hotfix
 
-**Install in place — no uninstall.** v1.5.0 (`versionCode 6`) is signed with the same persisted `vani-v1.jks` keystore as earlier releases, preserving chats, settings and downloaded models.
+**Install in place — no uninstall required.** v1.5.1 (`versionCode 7`) contains every v1.5.0 feature and is signed with the exact tracked `android/vani-v1.jks` identity. Downloaded models, chats and settings are not removed by the update.
 
-### Critical fixes
+### Install/package fixes
 
-- Repairs llama.cpp streaming when a chat template supplies an empty stop string; empty stops no longer suppress the first token.
-- Buffers split UTF-8 code points safely and makes stop-string handling cursor-safe across token boundaries, including partial stop prefixes.
-- Reports context-full, decode, and genuine no-text failures explicitly instead of silently leaving an empty response.
-- Preserves formatted multi-turn prompts and validated KV-prefix reuse; unsafe cache state is invalidated after native decode failures.
+- Uses conservative extractable JNI-library packaging for Android and MIUI package installers; `extractNativeLibs=true` is verified in the final binary manifest.
+- Uses both JAR/v1 and APK Signature Scheme v2 signatures with the established certificate. CI rejects any certificate mismatch instead of publishing an incompatible update.
+- Validates the final APK with Android `aapt`: package `ai.vani.app`, versionCode 7, versionName 1.5.1, minimum Android 8.0 (API 26), target API 34 and native `arm64-v8a` support.
+- Checks ZIP CRCs, 4-byte alignment, native-library compression, v1/v2 signatures and original-VRM storage before release publication.
+- Keeps the original `OC-Lily.vrm` uncompressed and preserves all inference, model-memory, Omni, TTS/ASR, Live Talk and avatar behavior from v1.5.0.
 
-### Strict model memory controls
+### v1.5.0 fixes retained
 
-- Separates **On disk** from **In RAM** throughout Model Hub and adds a Model memory section in Settings.
-- Adds explicit **Unload** actions for the Main LLM, standalone TTS and standalone ASR. Unload releases native resources without deleting downloaded files.
-- Allows one Main LLM, one standalone TTS and one standalone ASR; replacing a model releases its predecessor first.
-- Loading **LFM3-Omni-2B** releases every other speech model before allocation, uses bounded mobile context/batch settings, and blocks competing model loads until Omni is unloaded.
+- Empty stop strings no longer suppress the first token; split UTF-8 output and stop prefixes are buffered safely.
+- Explicit file-preserving LLM/TTS/ASR unload controls and real On disk versus In RAM state.
+- One Main LLM plus one standalone TTS and ASR, with full Omni isolation before allocation.
+- Reliable native microphone startup, cancellable Preview Voice and clause-by-clause streaming speech.
+- Existing battery-saver FPS controls, background audio teardown and native lifecycle protections remain enabled.
 
-### Voice runtime alignment
+### Verification and installation
 
-- Adds real native TTS/ASR residency reporting and explicit ASR model loading independent of microphone capture.
-- Keeps an offline ASR model loaded when dictation stops; only Unload or Omni isolation releases it.
-- Reuses a resident TTS model for speaker/rate changes and preserves cancellable **Preview Voice** playback.
-- Aligns offline microphone startup with the native AudioRecord bridge and reports capture failures instead of falsely falling back to a successful session.
-- Uses 700 ms VAD silence finalization and five-second offline speech segments for bounded dictation chunks.
+CI compiles the native/Android app, runs unit, synthetic-rig and 110 interactive checks, parses the final APK with Android tooling, verifies its signature against the tracked key, and publishes only after all gates pass. Google Play Protect is a separate on-device service; its proprietary scan cannot be run or guaranteed by this repository's CI.
 
-### Verification
-
-The CI run attached to this release builds the web bundle, runs unit, synthetic-rig and interactive browser checks, compiles native/Android components, signs with the existing v1 key, and verifies the resulting APK. Source-level and emulated checks do not constitute physical-device throughput or visual measurements.
-
-Download `vani-ai-1.5.0-release.apk` and sideload it over the previous version. Install a GGUF model and, for standalone offline voice, an ASR pack plus Phonon Ultra-Light from Model Hub.
+Download `vani-ai-1.5.1-release.apk` directly from this release. Avoid renaming or partially downloading the file, and compare its SHA-256 below before installing. The APK supports 64-bit ARM devices running Android 8.0 or later.

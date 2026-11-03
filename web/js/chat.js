@@ -514,7 +514,7 @@ function renderDrawer() {
     <div class="drawer-foot">
       <button class="drawer-foot-item" id="drawer-prompts">${icon('sparkles')}<span>System Prompt Studio</span></button>
       <button class="drawer-foot-item" id="drawer-models">${icon('box')}<span>Model Hub</span></button>
-      <div class="drawer-version">Vani AI v1.5.0 · on-device</div>
+      <div class="drawer-version">Vani AI v1.5.1 · on-device</div>
     </div>`;
   $('#drawer-new').addEventListener('click', () => { store.newThread(); closeDrawer(); renderChat(); });
   $('#drawer-prompts').addEventListener('click', () => { closeDrawer(); openPromptStudio(); });

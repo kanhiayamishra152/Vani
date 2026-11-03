@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       publish_release:
-        description: "Publish GitHub Release (v1.5.0)"
+        description: "Publish GitHub Release (v1.5.1)"
         type: boolean
         default: true
 
@@ -19,9 +19,9 @@ permissions:
 env:
   # Release tag for this build. Immutable releases seal their assets at creation;
   # never delete one to retry (that permanently burns the tag). APK is
-  # versionName 1.5.0 / versionCode 6, signed with the committed v1 keystore so
+  # versionName 1.5.1 / versionCode 7, signed with the committed v1 keystore so
   # it installs in-place over v1.0.1 with no uninstall.
-  RELEASE_TAG: "v1.5.0"
+  RELEASE_TAG: "v1.5.1"
   NODE_VERSION: "20"
   GRADLE_VERSION: "8.7"
   ANDROID_PLATFORM: "34"
@@ -118,38 +118,20 @@ jobs:
             node tests/interactive.mjs
           } 2>&1 | tee /tmp/vani-tests.log
 
-      - name: Prepare signing key
-        env:
-          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-          VANI_STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          VANI_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-          VANI_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+      - name: Prepare the tracked v1 signing key
         run: |
-          if [ -n "$KEYSTORE_BASE64" ]; then
-            echo "$KEYSTORE_BASE64" | base64 -d > android/vani-v1.jks
-            cat > android/keystore.properties <<EOF
-          storeFile=vani-v1.jks
-          storePassword=${VANI_STORE_PASSWORD:?KEYSTORE_PASSWORD secret required with KEYSTORE_BASE64}
-          keyAlias=${VANI_KEY_ALIAS:-vani-v1}
-          keyPassword=${VANI_KEY_PASSWORD:-$VANI_STORE_PASSWORD}
-          EOF
-            echo "Using keystore from repository secret"
-          else
-            if [ -f android/vani-v1.jks ] && [ -f android/keystore.properties ]; then
-              # The established v1 key is persisted in the checkout. Reuse it;
-              # never generate a replacement for a publishable update.
-              bash scripts/gen-keystore.sh
-              echo "Using the persisted repository v1 keystore"
-            elif [ "${GITHUB_EVENT_NAME}" != "pull_request" ]; then
-              echo "ERROR: no persisted v1 keystore or KEYSTORE_BASE64; refusing a new incompatible signing key." >&2
-              exit 1
-            else
-              # PR-only compile checks may use a disposable key; nothing from a
-              # PR is published as an in-place update.
-              bash scripts/gen-keystore.sh
-              echo "Using a disposable PR-only key (release signing secret absent)"
-            fi
+          # Update compatibility requires the exact established key, never a
+          # possibly-different CI secret or a newly generated fallback key.
+          if [ ! -f android/vani-v1.jks ] || [ ! -f android/keystore.properties ]; then
+            echo "ERROR: tracked android/vani-v1.jks and keystore.properties are required." >&2
+            exit 1
           fi
+          bash scripts/gen-keystore.sh
+          SP=$(grep '^storePassword=' android/keystore.properties | cut -d= -f2-)
+          AL=$(grep '^keyAlias=' android/keystore.properties | cut -d= -f2-)
+          keytool -exportcert -alias "$AL" -keystore android/vani-v1.jks \
+            -storepass "$SP" -file /tmp/vani-release-key.der
+          echo "Using the tracked v1 keystore; certificate exported for APK identity verification"
 
       - name: Assemble release APK
         working-directory: android
@@ -191,31 +173,70 @@ jobs:
           curl -fsSL -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/$REPO/issues" -d "$BODY" >/dev/null && echo "diagnostic issue posted" || echo "issue post failed"
 
-      - name: Align + verify APK
+      - name: Align + verify Android installer compatibility
         run: |
+          set -euo pipefail
           mkdir -p dist
           BT="$ANDROID_HOME/build-tools/${ANDROID_BUILD_TOOLS}"
           if [ ! -x "$BT/zipalign" ]; then
             BT=$(dirname "$(find "$ANDROID_HOME/build-tools" -name zipalign 2>/dev/null | sort -V | tail -1)")
           fi
           RAW=$(find android/app/build/outputs/apk/release -name '*.apk' | head -1)
-          OUT=dist/vani-ai-1.5.0-release.apk
+          OUT=dist/vani-ai-1.5.1-release.apk
           echo "RAW=$RAW"; echo "BT=$BT"
           cp "$RAW" "$OUT"
-          # AGP already zipaligns + signs. Verify alignment non-destructively;
-          # re-aligning a signed APK would break its v2/v3 signature, so only
-          # re-align + re-sign if the check actually fails.
           if "$BT/zipalign" -c -p 4 "$OUT"; then
             echo "APK is 4-byte aligned (AGP)"
           else
-            echo "Re-aligning + re-signing"
+            echo "Re-aligning + re-signing with the tracked v1 key"
             "$BT/zipalign" -f -p 4 "$RAW" "$OUT"
             SP=$(grep '^storePassword=' android/keystore.properties | cut -d= -f2-)
             KP=$(grep '^keyPassword=' android/keystore.properties | cut -d= -f2-)
             AL=$(grep '^keyAlias=' android/keystore.properties | cut -d= -f2-)
-            "$BT/apksigner" sign --ks android/vani-v1.jks --ks-key-alias "$AL" --ks-pass "pass:$SP" --key-pass "pass:$KP" "$OUT"
+            "$BT/apksigner" sign --ks android/vani-v1.jks --ks-key-alias "$AL" \
+              --ks-pass "pass:$SP" --key-pass "pass:$KP" \
+              --v1-signing-enabled true --v2-signing-enabled true \
+              --v3-signing-enabled false --v4-signing-enabled false "$OUT"
           fi
-          "$BT/apksigner" verify --print-certs "$OUT"
+          "$BT/zipalign" -c -p 4 "$OUT"
+          unzip -t "$OUT" > /tmp/vani-apk-zip-test.log
+
+          # Parse the final binary AndroidManifest with Android's own tooling.
+          AAPT="$BT/aapt"
+          "$AAPT" dump badging "$OUT" > /tmp/vani-badging.txt
+          "$AAPT" dump xmltree "$OUT" AndroidManifest.xml > /tmp/vani-manifest.txt
+          grep -F "package: name='ai.vani.app' versionCode='7' versionName='1.5.1'" /tmp/vani-badging.txt
+          grep -F "sdkVersion:'26'" /tmp/vani-badging.txt
+          grep -F "targetSdkVersion:'34'" /tmp/vani-badging.txt
+          grep -F "native-code: 'arm64-v8a'" /tmp/vani-badging.txt
+          grep -E 'android:extractNativeLibs.*=true' /tmp/vani-manifest.txt
+
+          # JNI libraries must use traditional compressed/extractable packaging;
+          # the original VRM must remain byte-identical and STORED for WebView mmap.
+          python3 - "$OUT" <<'PY'
+          import sys, zipfile
+          with zipfile.ZipFile(sys.argv[1]) as z:
+              libs = [i for i in z.infolist() if i.filename.startswith('lib/') and i.filename.endswith('.so')]
+              assert libs, 'no native libraries packaged'
+              assert all(i.compress_type == zipfile.ZIP_DEFLATED for i in libs), 'non-extractable/uncompressed JNI library found'
+              abis = {i.filename.split('/')[1] for i in libs}
+              assert abis == {'arm64-v8a'}, f'unexpected ABI set: {abis}'
+              vrm = [i for i in z.infolist() if i.filename.endswith('/assets/vrm/OC-Lily.vrm')]
+              assert len(vrm) == 1, 'original OC-Lily.vrm missing from final APK'
+              assert vrm[0].compress_type == zipfile.ZIP_STORED, 'VRM must remain uncompressed'
+              print(f'Validated {len(libs)} compressed JNI libraries for {sorted(abis)}; original VRM is STORED')
+          PY
+
+          "$BT/apksigner" verify --verbose --print-certs "$OUT" | tee /tmp/vani-apk-signature.txt
+          grep -F 'Verified using v1 scheme (JAR signing): true' /tmp/vani-apk-signature.txt
+          grep -F 'Verified using v2 scheme (APK Signature Scheme v2): true' /tmp/vani-apk-signature.txt
+          APK_CERT=$("$BT/apksigner" verify --print-certs "$OUT" | sed -nE 's/^Signer #1 certificate SHA-256 (digest|fingerprint): //p' | head -1 | tr 'A-F' 'a-f')
+          KEY_CERT=$(openssl dgst -sha256 /tmp/vani-release-key.der | awk '{print $NF}' | tr 'A-F' 'a-f')
+          if [ -z "$APK_CERT" ] || [ "$APK_CERT" != "$KEY_CERT" ]; then
+            echo "ERROR: APK certificate does not match tracked android/vani-v1.jks" >&2
+            exit 1
+          fi
+          echo "APK certificate matches the tracked v1 key: $APK_CERT"
           ls -lh "$OUT"
 
       - name: Package source ZIP
@@ -224,24 +245,24 @@ jobs:
       - name: SHA-256 hashes
         run: |
           cd dist
-          sha256sum vani-ai-1.5.0-release.apk vani-ai-1.5.0-source.zip | tee SHA256SUMS.txt
+          sha256sum vani-ai-1.5.1-release.apk vani-ai-1.5.1-source.zip | tee SHA256SUMS.txt
           cd ..
           sha256sum dist-tts/phonon-ultralight-8m-int8.tar.bz2 | sed 's#dist-tts/##' | tee -a dist/SHA256SUMS.txt
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: vani-ai-1.5.0-release-apk
+          name: vani-ai-1.5.1-release-apk
           path: |
-            dist/vani-ai-1.5.0-release.apk
+            dist/vani-ai-1.5.1-release.apk
             dist/SHA256SUMS.txt
           if-no-files-found: error
 
       - name: Upload source ZIP artifact
         uses: actions/upload-artifact@v4
         with:
-          name: vani-ai-1.5.0-source
-          path: dist/vani-ai-1.5.0-source.zip
+          name: vani-ai-1.5.1-source
+          path: dist/vani-ai-1.5.1-source.zip
           if-no-files-found: error
 
       - name: Publish the Ultra-Light TTS pack release
@@ -279,7 +300,7 @@ jobs:
           # upload the freshly built dist assets.
           if gh release view "$RELEASE_TAG" --repo "$REPO" >/dev/null 2>&1; then
             gh release download "$RELEASE_TAG" --repo "$REPO" \
-              -p 'vani-ai-1.5.0-release.apk' -p 'vani-ai-1.5.0-source.zip' -p 'SHA256SUMS.txt' \
+              -p 'vani-ai-1.5.1-release.apk' -p 'vani-ai-1.5.1-source.zip' -p 'SHA256SUMS.txt' \
               -D dist --clobber || true
           fi
           bash scripts/upload-gofile.sh
@@ -304,7 +325,7 @@ jobs:
             printf '\n_Mirrors: gofile.io upload unavailable for this run._\n' >> /tmp/body.md
           fi
 
-          ASSETS=(dist/vani-ai-1.5.0-release.apk dist/vani-ai-1.5.0-source.zip dist/SHA256SUMS.txt)
+          ASSETS=(dist/vani-ai-1.5.1-release.apk dist/vani-ai-1.5.1-source.zip dist/SHA256SUMS.txt)
 
           if ! gh release view "$RELEASE_TAG" --repo "$REPO" >/dev/null 2>&1; then
             # Immutable-safe: passing files to `gh release create` makes it create
@@ -312,12 +333,12 @@ jobs:
             # before the release seals. (Create-empty-then-upload is rejected 422.)
             # NEVER delete an immutable release to retry: that burns the tag name.
             gh release create "$RELEASE_TAG" --repo "$REPO" --target "$GITHUB_SHA" \
-              --title "Vani AI v1.5.0" --notes-file /tmp/body.md --latest "${ASSETS[@]}"
+              --title "Vani AI v1.5.1" --notes-file /tmp/body.md --latest "${ASSETS[@]}"
           else
             COUNT=$(gh release view "$RELEASE_TAG" --repo "$REPO" --json assets --jq '.assets | length')
             if [ "$COUNT" -ge 3 ]; then
               # Already published with assets: only title/notes may be refreshed.
-              gh release edit "$RELEASE_TAG" --repo "$REPO" --title "Vani AI v1.5.0" --notes-file /tmp/body.md --latest
+              gh release edit "$RELEASE_TAG" --repo "$REPO" --title "Vani AI v1.5.1" --notes-file /tmp/body.md --latest
             else
               echo "ERROR: $RELEASE_TAG exists with only $COUNT assets and is immutable; cannot add assets or reuse the tag. Bump RELEASE_TAG." >&2
               exit 1

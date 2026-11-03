@@ -157,7 +157,7 @@ function boot() {
   refreshStatus();
   autoRestore();
   nav('chat');
-  console.log('%cVani AI v1.5.0', 'font-weight:bold', hasNative() ? '(Android bridge active)' : '(browser preview)');
+  console.log('%cVani AI v1.5.1', 'font-weight:bold', hasNative() ? '(Android bridge active)' : '(browser preview)');
 }
 
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);

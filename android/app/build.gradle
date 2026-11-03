@@ -18,8 +18,8 @@ android {
         applicationId 'ai.vani.app'
         minSdk 26
         targetSdk 34
-        versionCode 6
-        versionName '1.5.0'
+        versionCode 7
+        versionName '1.5.1'
         ndk { abiFilters 'arm64-v8a' }
         externalNativeBuild {
             cmake {
@@ -44,6 +44,12 @@ android {
                 storePassword keystoreProps['storePassword']
                 keyAlias keystoreProps['keyAlias']
                 keyPassword keystoreProps['keyPassword']
+                // Conservative package-parser compatibility on MIUI and older
+                // Android installers. The certificate remains the tracked v1 key.
+                enableV1Signing true
+                enableV2Signing true
+                enableV3Signing false
+                enableV4Signing false
             }
         }
     }
@@ -67,7 +73,9 @@ android {
 
     // VRM / ONNX assets stay STORED (uncompressed) for instant mmap loads.
     androidResources { noCompress += ['vrm', 'glb', 'onnx'] }
-    packaging { jniLibs { useLegacyPackaging = false } }
+    // Extractable JNI libraries are the most compatible format for Android /
+    // MIUI package installers. VRM and ONNX assets remain uncompressed below.
+    packaging { jniLibs { useLegacyPackaging = true } }
     buildFeatures { buildConfig true }
 }
 
