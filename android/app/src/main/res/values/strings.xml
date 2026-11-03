@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Vani AI</string>
+    <string name="download_channel">Model downloads</string>
+    <string name="download_channel_desc">Resumable model downloads with progress</string>
+</resources>

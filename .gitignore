@@ -1,34 +1,27 @@
-# ---- Gradle / Android ----
-.gradle/
-build/
-local.properties
+# Dependencies / vendored sources (fetched by scripts, never committed)
+node_modules/
+third_party/
+
+# Build outputs
+dist/
+android/.gradle/
+android/build/
+android/app/build/
+android/app/.cxx/
+android/local.properties
+
+# Fetched binary assets (CI / build scripts regenerate these)
+android/app/libs/*.aar
+android/app/src/main/assets/www/
+android/app/src/main/assets/vad/
+assets/vrm/
+
+# Signing material — NEVER commit keystores or passwords
+*.jks
+*.keystore
 keystore.properties
-*.iml
-.idea/
-captures/
+android/keystore.properties
 
-# ---- Native ----
-# Third-party C/C++ sources are pulled in as git submodules (see .gitmodules) and are
-# NOT vendored into this tree, so they must never be committed.
-app/src/main/cpp/third_party/llama.cpp/
-app/src/main/cpp/third_party/sherpa-onnx/
-app/src/main/cpp/third_party/onnxruntime/
-*.o
-*.a
-*.so
-
-# ---- Downloaded models (scoped storage at runtime, but keep local scratch out) ----
-models/
-*.gguf
-*.onnx
-*.bin
-
-# ---- Tooling artifacts produced in this repo ----
-tools/out/
-*.apk
-*.aab
-*.zip
-
-# ---- OS ----
+# Scratch / OS noise
+*.log
 .DS_Store
-Thumbs.db

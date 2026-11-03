@@ -1,0 +1,26 @@
+{
+  "name": "vani-ai",
+  "version": "1.0.1",
+  "private": true,
+  "description": "Vani AI — private, on-device AI companion for Android. Monochrome UI, local GGUF inference, 3D VRM Live Talk.",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build-web.mjs",
+    "fetch:vrm": "node scripts/fetch-vrm.mjs",
+    "optimize:vrm": "node scripts/optimize-vrm.mjs",
+    "icons": "node scripts/gen-icons.mjs",
+    "fetch:native": "node scripts/fetch-native-deps.mjs",
+    "test": "node --test tests/*.test.js",
+    "test:interactive": "node tests/interactive.mjs",
+    "android": "bash android/build-apk.sh"
+  },
+  "dependencies": {
+    "@pixiv/three-vrm": "^3.4.0",
+    "katex": "^0.16.11",
+    "three": "0.170.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0",
+    "sharp": "^0.33.5"
+  }
+}

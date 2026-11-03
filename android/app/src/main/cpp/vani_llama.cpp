@@ -1,0 +1,411 @@
+// Vani AI — llama.cpp v0.8.0 JNI bridge.
+// Text + vision (mtmd) GGUF inference with chat-template rendering, prefix
+// KV-cache reuse, streaming token callbacks and instant stop (barge-in).
+#include <jni.h>
+#include <android/log.h>
+
+#include <atomic>
+#include <chrono>
+#include <cstring>
+#include <mutex>
+#include <string>
+#include <vector>
+
+#include "llama.h"
+#include "common.h"
+#include "chat.h"
+#include "sampling.h"
+#include "json.h"
+#include "mtmd.h"
+#include "mtmd-helper.h"
+
+#define LOG_TAG "VaniLlama"
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+
+namespace {
+
+struct VaniCtx {
+    llama_model * model = nullptr;
+    llama_context * ctx = nullptr;
+    mtmd_context * mctx = nullptr;
+    common_chat_templates_ptr tmpls;
+    const llama_vocab * vocab = nullptr;
+    std::vector<llama_token> prev_tokens;   // prefix KV cache
+    std::atomic<bool> stop{false};
+    std::mutex mtx;
+    int n_threads = 4;
+    int n_batch = 256;
+};
+
+void llama_log_to_android(ggml_log_level level, const char * text, void *) {
+    if (level >= GGML_LOG_LEVEL_WARN) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, "%s", text);
+}
+
+std::string jstr(JNIEnv * env, jstring s) {
+    if (!s) return "";
+    const char * c = env->GetStringUTFChars(s, nullptr);
+    std::string out(c ? c : "");
+    if (c) env->ReleaseStringUTFChars(s, c);
+    return out;
+}
+
+// UTF-8 safe jstring (token pieces may contain any Unicode).
+jstring jstringFromUtf8(JNIEnv * env, const std::string & s) {
+    jclass strCls = env->FindClass("java/lang/String");
+    jmethodID ctor = env->GetMethodID(strCls, "<init>", "([BLjava/lang/String;)V");
+    jbyteArray bytes = env->NewByteArray((jsize) s.size());
+    env->SetByteArrayRegion(bytes, 0, (jsize) s.size(), reinterpret_cast<const jbyte *>(s.data()));
+    jstring charset = env->NewStringUTF("UTF-8");
+    jstring out = (jstring) env->NewObject(strCls, ctor, bytes, charset);
+    env->DeleteLocalRef(bytes);
+    env->DeleteLocalRef(charset);
+    env->DeleteLocalRef(strCls);
+    return out;
+}
+
+std::vector<unsigned char> base64_decode(const std::string & in) {
+    static const int8_t T[256] = {
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,62,-1,-1,-1,63,52,53,54,55,56,57,58,59,60,61,-1,-1,-1,-1,-1,-1,
+        -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,-1,-1,-1,-1,-1,
+        -1,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1
+    };
+    std::vector<unsigned char> out;
+    out.reserve(in.size() * 3 / 4);
+    int val = 0, bits = -8;
+    for (unsigned char c : in) {
+        if (c == '=') break;
+        int8_t d = T[c];
+        if (d < 0) continue;
+        val = (val << 6) + d;
+        bits += 6;
+        if (bits >= 0) { out.push_back((unsigned char) ((val >> bits) & 0xff)); bits -= 8; }
+    }
+    return out;
+}
+
+// Longest prefix of s that ends on a complete UTF-8 code point.
+size_t utf8_complete_prefix(const std::string & s) {
+    size_t i = 0, last = 0;
+    while (i < s.size()) {
+        unsigned char c = (unsigned char) s[i];
+        int len = c < 0x80 ? 1 : (c >> 5) == 0x6 ? 2 : (c >> 4) == 0xe ? 3 : (c >> 3) == 0x1e ? 4 : 1;
+        if (i + len > s.size()) break;
+        i += len;
+        last = i;
+    }
+    return last;
+}
+
+std::vector<llama_token> tokenize(const llama_vocab * vocab, const std::string & text, bool add_special) {
+    int n = llama_tokenize(vocab, text.c_str(), (int32_t) text.size(), nullptr, 0, add_special, true);
+    if (n < 0) n = -n;
+    std::vector<llama_token> tokens(n);
+    int rc = llama_tokenize(vocab, text.c_str(), (int32_t) text.size(), tokens.data(), (int32_t) tokens.size(), add_special, true);
+    if (rc < 0) return {};
+    tokens.resize(rc);
+    return tokens;
+}
+
+std::string token_piece(const llama_vocab * vocab, llama_token tok) {
+    char buf[512];
+    int n = llama_token_to_piece(vocab, tok, buf, sizeof(buf), 0, false);
+    if (n < 0) {
+        std::vector<char> big(-n);
+        n = llama_token_to_piece(vocab, tok, big.data(), (int32_t) big.size(), 0, false);
+        if (n <= 0) return "";
+        return std::string(big.data(), n);
+    }
+    return std::string(buf, n);
+}
+
+void replace_all(std::string & s, const std::string & from, const std::string & to) {
+    if (from.empty()) return;
+    size_t pos = 0;
+    while ((pos = s.find(from, pos)) != std::string::npos) { s.replace(pos, from.size(), to); pos += to.size(); }
+}
+
+struct Callback {
+    JNIEnv * env;
+    jobject obj;
+    jmethodID mToken, mDone, mError;
+    void token(const std::string & t) {
+        jstring s = jstringFromUtf8(env, t);
+        env->CallVoidMethod(obj, mToken, s);
+        env->DeleteLocalRef(s);
+    }
+    void done(const std::string & stats) {
+        jstring s = env->NewStringUTF(stats.c_str());
+        env->CallVoidMethod(obj, mDone, s);
+        env->DeleteLocalRef(s);
+    }
+    void error(const std::string & e) {
+        jstring s = jstringFromUtf8(env, e);
+        env->CallVoidMethod(obj, mError, s);
+        env->DeleteLocalRef(s);
+    }
+};
+
+} // namespace
+
+extern "C" {
+
+JNIEXPORT void JNICALL Java_ai_vani_app_LlmEngine_nativeInit(JNIEnv *, jclass) {
+    llama_backend_init();
+    llama_log_set(llama_log_to_android, nullptr);
+    mtmd_helper_log_set(llama_log_to_android, nullptr);
+    LOGI("llama backend initialized (%s)", llama_print_system_info());
+}
+
+JNIEXPORT jlong JNICALL Java_ai_vani_app_LlmEngine_nativeLoad(
+        JNIEnv * env, jclass, jstring jpath, jstring jmmproj,
+        jint nCtx, jint nThreads, jint nBatch, jboolean flashAttn) {
+    std::string path = jstr(env, jpath);
+    std::string mmproj = jstr(env, jmmproj);
+
+    llama_model_params mparams = llama_model_default_params();
+    mparams.n_gpu_layers = 0;
+    mparams.load_mode = LLAMA_LOAD_MODE_MMAP;
+
+    llama_model * model = llama_model_load_from_file(path.c_str(), mparams);
+    if (!model) { LOGE("model load failed: %s", path.c_str()); return 0; }
+
+    llama_context_params cparams = llama_context_default_params();
+    cparams.n_ctx = (uint32_t) nCtx;
+    cparams.n_batch = (uint32_t) nBatch;
+    cparams.n_ubatch = (uint32_t) nBatch;
+    cparams.n_threads = nThreads;
+    cparams.n_threads_batch = nThreads;
+    cparams.flash_attn_type = flashAttn ? LLAMA_FLASH_ATTN_TYPE_ENABLED : LLAMA_FLASH_ATTN_TYPE_AUTO;
+    cparams.embeddings = false;
+    cparams.no_perf = true;
+
+    llama_context * ctx = llama_init_from_model(model, cparams);
+    if (!ctx) { LOGE("context init failed"); llama_model_free(model); return 0; }
+
+    auto * v = new VaniCtx();
+    v->model = model;
+    v->ctx = ctx;
+    v->vocab = llama_model_get_vocab(model);
+    v->n_threads = nThreads;
+    v->n_batch = nBatch;
+    v->tmpls = common_chat_templates_init(model, "");
+
+    if (!mmproj.empty()) {
+        mtmd_context_params mp = mtmd_context_params_default();
+        mp.use_gpu = false;
+        mp.n_threads = nThreads;
+        mp.print_timings = false;
+        mp.warmup = false;
+        mp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_AUTO;
+        v->mctx = mtmd_init_from_file(mmproj.c_str(), model, mp);
+        if (!v->mctx) LOGE("mmproj load failed (vision disabled): %s", mmproj.c_str());
+    }
+    LOGI("model ready: ctx=%d threads=%d vision=%d", nCtx, nThreads, v->mctx ? mtmd_support_vision(v->mctx) : 0);
+    return reinterpret_cast<jlong>(v);
+}
+
+JNIEXPORT jstring JNICALL Java_ai_vani_app_LlmEngine_nativeStatus(JNIEnv * env, jclass, jlong handle) {
+    auto * v = reinterpret_cast<VaniCtx *>(handle);
+    common_json j = common_json::object();
+    if (v) {
+        j["nCtx"] = (int) llama_n_ctx(v->ctx);
+        j["nCtxTrain"] = llama_model_n_ctx_train(v->model);
+        j["nThreads"] = v->n_threads;
+        j["vision"] = v->mctx ? mtmd_support_vision(v->mctx) : false;
+        j["audio"] = v->mctx ? mtmd_support_audio(v->mctx) : false;
+    }
+    return env->NewStringUTF(j.dump().c_str());
+}
+
+JNIEXPORT void JNICALL Java_ai_vani_app_LlmEngine_nativeGenerate(
+        JNIEnv * env, jclass, jlong handle, jstring jmessages, jstring jparams,
+        jstring jimages, jstring jgenId, jobject cbObj) {
+    auto * v = reinterpret_cast<VaniCtx *>(handle);
+    jclass cbCls = env->GetObjectClass(cbObj);
+    Callback cb{env, cbObj,
+                env->GetMethodID(cbCls, "onToken", "(Ljava/lang/String;)V"),
+                env->GetMethodID(cbCls, "onDone", "(Ljava/lang/String;)V"),
+                env->GetMethodID(cbCls, "onError", "(Ljava/lang/String;)V")};
+    if (!v || !v->model || !v->ctx) { cb.error("No model loaded"); return; }
+
+    std::lock_guard<std::mutex> lock(v->mtx);
+    v->stop = false;
+
+    try {
+        common_json messages = common_json::parse(jstr(env, jmessages));
+        common_json params = common_json::parse(jstr(env, jparams));
+        common_json images = common_json::parse(jstr(env, jimages));
+
+        int maxTokens = params.contains("maxTokens") ? params.at("maxTokens").get<int>() : 1024;
+        float temp = params.contains("temperature") ? (float) params.at("temperature").get<double>() : 0.7f;
+        float topP = params.contains("topP") ? (float) params.at("topP").get<double>() : 0.9f;
+        int topK = params.contains("topK") ? params.at("topK").get<int>() : 40;
+        float repeat = params.contains("repeatPenalty") ? (float) params.at("repeatPenalty").get<double>() : 1.1f;
+        bool thinking = params.contains("enableThinking") && params.at("enableThinking").get<bool>();
+
+        // ---- chat template ----
+        common_chat_templates_inputs inputs;
+        inputs.add_generation_prompt = true;
+        inputs.use_jinja = true;
+        inputs.enable_thinking = thinking;
+        for (size_t i = 0; i < messages.size(); i++) {
+            const auto & m = messages.at(i);
+            common_chat_msg msg;
+            msg.role = m.at("role").get<std::string>();
+            msg.content = m.contains("content") ? m.at("content").get<std::string>() : "";
+            inputs.messages.push_back(std::move(msg));
+        }
+        common_chat_params cparams = common_chat_templates_apply(v->tmpls.get(), inputs);
+        std::string prompt = cparams.prompt.str();
+        const auto & stopStrings = cparams.additional_stops;
+
+        // ---- sampling ----
+        common_params_sampling sp;
+        sp.temp = temp;
+        sp.top_k = topK;
+        sp.top_p = topP;
+        sp.penalty_repeat = repeat;
+        sp.seed = (uint32_t) std::chrono::steady_clock::now().time_since_epoch().count();
+        common_sampler * smpl = common_sampler_init(v->model, sp);
+
+        llama_memory_t mem = llama_get_memory(v->ctx);
+        const int n_ctx = (int) llama_n_ctx(v->ctx);
+        llama_pos n_past = 0;
+        size_t n_prompt = 0;
+        bool hasImages = images.size() > 0 && v->mctx;
+        std::vector<llama_token> prompt_tokens;
+
+        if (hasImages) {
+            // ---- vision path: mtmd bitmaps + chunked eval ----
+            std::string marker = mtmd_default_marker();
+            replace_all(prompt, "<|image_pad|>", marker);
+            replace_all(prompt, "<|image|>", marker);
+            replace_all(prompt, "<start_of_image>", marker);
+            replace_all(prompt, "<image>", marker);
+
+            std::vector<mtmd_bitmap *> bitmaps;
+            for (size_t i = 0; i < images.size(); i++) {
+                std::string b64 = images.at(i).get<std::string>();
+                size_t comma = b64.find(',');
+                if (comma != std::string::npos) b64 = b64.substr(comma + 1);
+                auto bytes = base64_decode(b64);
+                mtmd_helper_bitmap_wrapper w = mtmd_helper_bitmap_init_from_buf(
+                        v->mctx, bytes.data(), bytes.size(), false, mtmd_helper_init_opt_default());
+                if (w.bitmap) bitmaps.push_back(w.bitmap);
+            }
+            mtmd_input_chunks * chunks = mtmd_input_chunks_init();
+            mtmd_input_text text{prompt.c_str(), prompt.size(), false, true};
+            int32_t rc = mtmd_tokenize(v->mctx, chunks, &text,
+                                       bitmaps.empty() ? nullptr : bitmaps.data(), bitmaps.size());
+            if (rc != 0) {
+                for (auto * b : bitmaps) mtmd_bitmap_free(b);
+                mtmd_input_chunks_free(chunks);
+                common_sampler_free(smpl);
+                cb.error("Failed to tokenize image input");
+                return;
+            }
+            llama_memory_clear(mem, true);
+            llama_pos new_past = 0;
+            rc = mtmd_helper_eval_chunks(v->mctx, v->ctx, chunks, 0, 0, v->n_batch, true, &new_past);
+            n_past = new_past;
+            for (auto * b : bitmaps) mtmd_bitmap_free(b);
+            mtmd_input_chunks_free(chunks);
+            if (rc != 0) { common_sampler_free(smpl); cb.error("Image evaluation failed"); return; }
+            v->prev_tokens.clear();
+        } else {
+            // ---- text path with prefix KV-cache reuse ----
+            prompt_tokens = tokenize(v->vocab, prompt, false);
+            if (prompt_tokens.empty()) { common_sampler_free(smpl); cb.error("Empty prompt"); return; }
+            size_t keep = 0;
+            while (keep < v->prev_tokens.size() && keep < prompt_tokens.size()
+                   && v->prev_tokens[keep] == prompt_tokens[keep]) keep++;
+            llama_memory_seq_rm(mem, 0, (llama_pos) keep, -1);
+            n_past = (llama_pos) keep;
+            for (size_t i = keep; i < prompt_tokens.size() && !v->stop; ) {
+                int32_t n = (int32_t) std::min<size_t>(v->n_batch, prompt_tokens.size() - i);
+                llama_batch batch = llama_batch_get_one(prompt_tokens.data() + i, n);
+                if (llama_decode(v->ctx, batch) != 0) {
+                    common_sampler_free(smpl);
+                    cb.error("Prompt evaluation failed (context overflow?)");
+                    return;
+                }
+                i += n;
+                n_past += n;
+            }
+            n_prompt = prompt_tokens.size();
+        }
+
+        // ---- generation loop ----
+        auto t0 = std::chrono::steady_clock::now();
+        std::string full, pending;
+        size_t emitted = 0;
+        int n_gen = 0;
+        bool stopped = false;
+
+        while (n_gen < maxTokens) {
+            if (v->stop) { stopped = true; break; }
+            if (n_past >= n_ctx) break;
+            llama_token tok = common_sampler_sample(smpl, v->ctx, -1);
+            common_sampler_accept(smpl, tok, true);
+            if (llama_vocab_is_eog(v->vocab, tok)) break;
+
+            full += token_piece(v->vocab, tok);
+            bool hitStop = false;
+            for (const auto & s : stopStrings) {
+                size_t p = full.find(s);
+                if (p != std::string::npos) { full.resize(p); hitStop = true; break; }
+            }
+            // Emit only complete UTF-8 (pieces can split multi-byte chars).
+            pending = full.substr(emitted);
+            size_t valid = hitStop ? pending.size() : utf8_complete_prefix(pending);
+            if (valid > 0) { cb.token(pending.substr(0, valid)); emitted += valid; }
+            if (hitStop) break;
+
+            n_gen++;
+            prompt_tokens.push_back(tok);
+            llama_batch batch = llama_batch_get_one(&tok, 1);
+            if (llama_decode(v->ctx, batch) != 0) break;
+            n_past++;
+        }
+        if (emitted < full.size()) cb.token(full.substr(emitted));
+
+        if (!hasImages) v->prev_tokens = std::move(prompt_tokens);
+        common_sampler_free(smpl);
+
+        double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        common_json stats = common_json::object();
+        stats["tokens"] = n_gen;
+        stats["tps"] = secs > 0 ? n_gen / secs : 0.0;
+        stats["promptTokens"] = (int) n_prompt;
+        stats["stopped"] = stopped;
+        cb.done(stats.dump());
+    } catch (const std::exception & e) {
+        LOGE("generate: %s", e.what());
+        cb.error(e.what());
+    } catch (...) {
+        cb.error("Generation failed");
+    }
+}
+
+JNIEXPORT void JNICALL Java_ai_vani_app_LlmEngine_nativeStop(JNIEnv *, jclass, jlong handle) {
+    auto * v = reinterpret_cast<VaniCtx *>(handle);
+    if (v) v->stop = true;
+}
+
+JNIEXPORT void JNICALL Java_ai_vani_app_LlmEngine_nativeFree(JNIEnv *, jclass, jlong handle) {
+    auto * v = reinterpret_cast<VaniCtx *>(handle);
+    if (!v) return;
+    std::lock_guard<std::mutex> lock(v->mtx);
+    if (v->mctx) mtmd_free(v->mctx);
+    if (v->ctx) llama_free(v->ctx);
+    if (v->model) llama_model_free(v->model);
+    delete v;
+}
+
+} // extern "C"
