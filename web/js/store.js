@@ -17,7 +17,7 @@ export const DEFAULT_SETTINGS = {
   maxTokens: 1024, temperature: 0.7, topP: 0.9, topK: 40, repeatPenalty: 1.1,
   vadSensitivity: 0.5,
   batterySaver: false, fpsTarget: 60,
-  ttsEngine: 'phonon', ttsModelId: 'phonon', ttsSpeed: 1.0, ttsSid: 0,
+  ttsEngine: 'phonon', ttsModelId: 'phonon', ttsSpeed: 1.0, ttsSid: 107,
   asrEngine: 'auto', asrModelId: '', asrLanguage: 'en',
 };
 export const settings = { ...DEFAULT_SETTINGS, ...read(K.settings, {}) };

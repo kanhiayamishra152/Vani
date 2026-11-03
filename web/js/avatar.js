@@ -1,10 +1,12 @@
 // Vani AI — OC-Lily VRM stage (three.js + @pixiv/three-vrm).
-// Mounted ONLY while Live Talk is open. Adreno 613 guardrails:
-//   pixelRatio = min(devicePixelRatio, 1.25)  — never native 2.75
-//   dt = min(clockDelta, 0.05)                — spring bones never explode
-//   60 FPS active / 24–30 FPS idle, Battery Saver caps further.
+// v1.2.0: full-quality render of the 100% original VRM (zero compression).
+//   antialias:true, pixelRatio = min(devicePixelRatio, 2.0), max anisotropy,
+//   MToon shading + outlines, sRGB output, OrbitControls (1-finger orbit,
+//   2-finger pinch). Persistent singleton: pause() on close, resume() on open,
+//   never forceContextLoss(). dt clamped to 0.05 so spring bones never explode.
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 import { sampleAction } from './anime.js';
 import { clamp } from './util.js';
@@ -39,8 +41,8 @@ export class AvatarStage {
 
   async init() {
     const c = this.container;
-    this.renderer = new THREE.WebGLRenderer({ antialias: false, alpha: true, powerPreference: 'low-power' });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.25));
+    this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'high-performance' });
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2.0));
     this.renderer.setSize(c.clientWidth || 360, c.clientHeight || 640);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     c.appendChild(this.renderer.domElement);
@@ -48,7 +50,20 @@ export class AvatarStage {
     this.scene = new THREE.Scene();
     this.camera = new THREE.PerspectiveCamera(38, (c.clientWidth || 360) / (c.clientHeight || 640), 0.1, 30);
     this.camera.position.set(0, 1.05, 3.2);
-    this.camera.lookAt(0, 0.85, 0);
+
+    // OrbitControls: 1-finger orbit + 2-finger pinch zoom, damped.
+    this.controls = new OrbitControls(this.camera, this.renderer.domElement);
+    this.controls.target.set(0, 1.05, 0);
+    this.controls.enableRotate = true;
+    this.controls.enableDamping = true;
+    this.controls.dampingFactor = 0.08;
+    this.controls.enableZoom = true;
+    this.controls.enablePan = false;
+    this.controls.minDistance = 1.2;
+    this.controls.maxDistance = 3.8;
+    this.controls.minPolarAngle = 0.35;
+    this.controls.maxPolarAngle = Math.PI / 2 + 0.25;
+    this.controls.update();
 
     this.scene.add(new THREE.HemisphereLight(0xffffff, 0x3a3a3a, 1.15));
     const key = new THREE.DirectionalLight(0xffffff, 1.7);
@@ -58,15 +73,7 @@ export class AvatarStage {
     this.root = new THREE.Group();
     this.scene.add(this.root);
 
-    this.ro = new ResizeObserver(() => {
-      if (this.disposed) return;
-      const w = c.clientWidth, h = c.clientHeight;
-      if (!w || !h) return;
-      this.renderer.setSize(w, h);
-      this.camera.aspect = w / h;
-      this.camera.updateProjectionMatrix();
-    });
-    this.ro.observe(c);
+    this._observeResize();
 
     const loader = new GLTFLoader();
     loader.register(parser => new VRMLoaderPlugin(parser));
@@ -80,10 +87,20 @@ export class AvatarStage {
     if (this.disposed) return;
     const vrm = gltf.userData.vrm;
     if (!vrm) { const e = new Error('VRM extension missing'); this.opts.onError?.(e); throw e; }
-    VRMUtils.removeUnnecessaryVertices(gltf.scene);
-    VRMUtils.combineSkeletons(gltf.scene);
+    // v1.2.0: keep the ORIGINAL geometry/skeletons untouched (no vertex merging,
+    // no skeleton combining). Only VRM 0.x needs a coordinate-space rotation.
     if (vrm.meta?.metaVersion === '0') VRMUtils.rotateVRM0(vrm);
-    vrm.scene.traverse(o => { o.frustumCulled = false; });
+    const maxAniso = this.renderer.capabilities.getMaxAnisotropy();
+    vrm.scene.traverse(o => {
+      o.frustumCulled = false;
+      const mats = Array.isArray(o.material) ? o.material : (o.material ? [o.material] : []);
+      for (const m of mats) {
+        for (const key of Object.keys(m)) {
+          const v = m[key];
+          if (v && v.isTexture) { v.anisotropy = maxAniso; v.needsUpdate = true; }
+        }
+      }
+    });
     this.vrm = vrm;
     this.root.add(vrm.scene);
     if (vrm.lookAt) vrm.lookAt.target = this.camera;
@@ -98,11 +115,12 @@ export class AvatarStage {
     this.startLoop();
   }
 
-  /** Arms hang naturally ~10° from the torso across VRM 0.x/1.0 rigs.
-   *  Sign is auto-detected by measuring where the hand lands. */
+  /** Arms rest ~14° outside the torso/skirt so hands hang beside the skirt
+   *  without clipping; elbows bent slightly forward. Sign auto-detected by
+   *  measuring where the hand lands (works across VRM 0.x/1.0 rigs). */
   calibrateRestPose() {
     const vrm = this.vrm;
-    const DOWN = (90 - 10) * Math.PI / 180; // 80° from horizontal T-pose
+    const DOWN = (90 - 14) * Math.PI / 180; // 76° from horizontal T-pose = 14° clearance
     for (const side of ['left', 'right']) {
       const upper = this.bones[`${side}UpperArm`];
       const hand = this.bones[`${side}Hand`] || this.bones[`${side}LowerArm`];
@@ -116,8 +134,10 @@ export class AvatarStage {
         return handY < shoulderY - 0.1;
       };
       if (!test(sign)) { sign = -sign; test(sign); }
-      this.rest[`${side}UpperArm`] = { x: 0, y: 0, z: sign * DOWN };
-      this.rest[`${side}LowerArm`] = { x: 0, y: 0, z: sign * 0.06 };
+      // Slight forward reach at the shoulder + a soft elbow bend keep the hands
+      // in front of the skirt plane rather than intersecting it.
+      this.rest[`${side}UpperArm`] = { x: 0.05, y: 0, z: sign * DOWN };
+      this.rest[`${side}LowerArm`] = { x: -0.14, y: 0, z: sign * 0.05 };
       upper.rotation.set(0, 0, 0);
     }
     for (const name of POSE_BONES) {
@@ -152,9 +172,10 @@ export class AvatarStage {
   }
 
   startLoop() {
+    cancelAnimationFrame(this.raf);
     this.last = performance.now();
     const loop = () => {
-      if (this.disposed || this.paused) return;
+      if (this.disposed || this.paused || !this.vrm) return;
       this.raf = requestAnimationFrame(loop);
       const now = performance.now();
       const interval = 1000 / this.targetFps();
@@ -162,6 +183,7 @@ export class AvatarStage {
       const dt = Math.min((now - this.last) / 1000, 0.05); // clamp BEFORE vrm.update
       this.last = now;
       this.update(dt);
+      this.controls?.update(); // damped orbit / pinch
       this.renderer.render(this.scene, this.camera);
     };
     this.raf = requestAnimationFrame(loop);
@@ -176,6 +198,33 @@ export class AvatarStage {
     if (this.disposed || !this.paused) return;
     this.paused = false;
     this.startLoop();
+  }
+
+  _resize() {
+    if (this.disposed || !this.renderer || !this.container) return;
+    const w = this.container.clientWidth, h = this.container.clientHeight;
+    if (!w || !h) return;
+    this.renderer.setSize(w, h);
+    this.camera.aspect = w / h;
+    this.camera.updateProjectionMatrix();
+  }
+  _observeResize() {
+    try { this.ro?.disconnect(); } catch {}
+    this.ro = new ResizeObserver(() => this._resize());
+    if (this.container) this.ro.observe(this.container);
+  }
+
+  /** Re-attach the persistent canvas to a freshly-built Live stage and resume.
+   *  The WebGL context is never lost, so the second open is never black. */
+  remount(container) {
+    if (this.disposed || !this.renderer) return false;
+    this.container = container;
+    try { container.appendChild(this.renderer.domElement); } catch {}
+    this._observeResize();
+    this._resize();
+    this.paused = false;
+    this.startLoop();
+    return true;
   }
 
   update(dt) {
@@ -283,9 +332,13 @@ export class AvatarStage {
     this.vrm.update(dt);
   }
 
+  /** Full teardown — ONLY on app exit, never on Live close (Live uses pause()).
+   *  Deliberately does NOT call forceContextLoss(): losing the WebGL context is
+   *  what caused the black screen on the second Live open. */
   dispose() {
     this.disposed = true;
     this.pause();
+    try { this.controls?.dispose(); } catch {}
     try { this.ro?.disconnect(); } catch {}
     try { if (this.vrm) VRMUtils.deepDispose(this.vrm.scene); } catch {}
     try {
@@ -298,8 +351,8 @@ export class AvatarStage {
         }
       });
     } catch {}
-    try { this.renderer?.dispose(); this.renderer?.forceContextLoss(); } catch {}
+    try { this.renderer?.dispose(); } catch {}
     try { this.container.innerHTML = ''; } catch {}
-    this.vrm = null; this.scene = null; this.renderer = null;
+    this.vrm = null; this.scene = null; this.renderer = null; this.controls = null;
   }
 }

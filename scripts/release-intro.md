@@ -1,30 +1,40 @@
-## Vani AI v1.0.1 — critical stability fix
+## Vani AI v1.2.0 — full-quality avatar, real voices, persistent models, unbreakable downloads
 
-This release fixes the **total UI freeze** reported on v1.0.0 (app locked up within ~5 s on a Poco M6 Plus 5G; Live Talk, Model Hub, Settings and the bottom navigation all became unresponsive).
+This release addresses every issue from the on-device v1.0.1 test session (Poco M6 Plus 5G): the blurry avatar, the black screen on the second Live open, the fake "Phonon" voice, models vanishing between launches, downloads stalling at 98% / "100% extracting…", and Live Talk hanging on "Thinking…".
 
-### Root cause
-The WebView event bus had two **synchronous self-recursion loops** that ran only on a real device (the browser preview skipped them, which is why they slipped through):
-- `nav()` emitted `nav` while also listening to `nav` → infinite recursion on every tab switch and at boot.
-- `applyStatus()` emitted `llm.status` while also listening to `llm.status` → infinite recursion whenever the native engine reported status.
+**Install in place — no uninstall.** v1.2.0 is signed with the *same* persisted keystore as v1.0.1 (`versionCode 3`), so it updates directly over v1.0.1 and keeps your chats, settings and downloaded models.
 
-Each recursion rebuilt the chat/hub DOM thousands of times and flooded the native bridge, wedging the main thread so no tap, scroll or navigation could be processed.
+### 1 · OC-Lily avatar — 100% original, full quality
+- **Zero compression.** The texture-downscale / re-encode pipeline is removed; the owner's original `OC-Lily-Neural4D-AnimeArt.vrm` is bundled byte-for-byte (the CI optimize step is gone). No geometry merging either.
+- **Crisp render:** `antialias:true`, `pixelRatio = min(devicePixelRatio, 2.0)`, sRGB output, MToon shading + outlines, and **max anisotropic filtering** on every texture.
+- **OrbitControls:** one-finger orbit + two-finger pinch zoom, damped (0.08), target at the chest, zoom clamped 1.2–3.8 m.
+- **Rest pose fixed:** arms rest ~14° outside the torso/skirt with elbows slightly forward so hands never clip; the 12 `/anime` actions were refined to avoid self-intersection.
+- **No more black screen:** the stage is a persistent singleton — closing Live **pauses** it, opening **resumes** it; the WebGL context is never force-lost.
+- Tapping an action in the `/anime` sheet now performs the gesture **only** — it no longer writes `/anime …` bubbles into your chat.
 
-### Fixes
-- Split command events from notification events (`nav` → `tab.changed`, `llm.status` → `llm.statusChanged`) so handlers can never re-trigger themselves.
-- Added a **re-entrancy depth guard** to the event bus — any future runaway synchronous recursion is blocked instead of freezing the UI.
-- Raised `#sheet-root` / `#modal-root` above the Live overlay so the **/anime command sheet is reachable during Live Talk** (it was previously hidden behind it).
-- Hardened scroll containers (`touch-action: pan-y`, `overscroll-behavior: contain`) and the `[hidden]` rule (`pointer-events: none !important`).
-- Live Talk opens **even with no model installed**, so the avatar and `/anime` gestures can be tested immediately.
+### 2 · Models that stay put
+- Everything (catalog, custom-URL and local-imported) lives in `filesDir/models/` with a persisted registry **plus a startup disk scan** that reconciles any `.gguf` / `.onnx` / voice files back into the Hub — nothing disappears between launches.
+- A top **"Downloaded / Installed"** section in Models → All lists every installed model with **Use / Active** and **Delete**, alongside its category card.
+- The **last active model auto-reloads** on launch.
+- Added **LFM2.5-350M** and **LFM2.5-1.2B-Instruct** (Liquid AI) as first-class Main Models next to LFM3-Omni-2B.
 
-### Verified with real interactive runtime tests
-49 automated headless-Chromium checks (mocked Android bridge, **no model installed**) click every control and assert state transitions — not DOM existence:
-- Boot responsive, zero recursion; 40 tab switches each < 1 ms (worst 0.50 ms) and still clickable/scrollable.
-- Live Talk opens with no LLM, all **12 /anime commands** dispatch, red X closes and returns to Chat (overlay fully unmounted).
-- Model Hub: 6 main + supplementary cards, every filter pill, quant picker, projector checkbox, plain **Download** (no upgrade gate) streaming live progress (42 %, 440.4 / 1048.7 MB, 5.0 MB/s), Pause → Resume, Cancel.
-- Settings: scrollable, n_ctx 512–32768, threads 1–8, toggles, sliders, Prompt Studio.
-- Header menu / Prompt Studio / New Chat all open on the first tap.
+### 3 · Phonon is a real voice now
+- Phonon is a genuine downloadable **4-voice neural pack** (Piper VCTK multi-speaker, int8, **~22.3 MB** — an honest size; no real 8.4 MB multi-speaker pack exists). Live progress, pause/cancel, persistent install.
+- **4-voice selector + Preview** on the card *and* in Settings → Live Talk: **Vani/Aria** (warm female), **Nova/Meera** (expressive female), **Orion/Aarav** (deep male), **Echo/Kabir** (crisp male).
+- Voice selectors + preview also for **Pocket TTS 100M** and **Kokoro-82M** (incl. Hindi `hf_alpha` / `hm_omega`).
+
+### 4 · Downloads that finish + 7 ASR engines
+- The 98% / "100% extracting…" stall and broken Resume-at-100% are fixed: standalone `.onnx` models install with **no extraction**, archives **stream-extract with live progress**, and finalize is **idempotent** — at 100% a model becomes **Installed → Activate / Delete**, never "Resume".
+- **Seven ASR options:** Whisper Tiny / Base / Small (multilingual, int8 standalone), Moonshine Tiny / Base (fast English), SenseVoice Small (multilingual + emotion), and Zipformer (streaming-fast English).
+- **Add TTS/ASR by Hugging Face URL or repo** and **Import local `.onnx` / `.bin` / `.gguf`** (multi-file) right inside the Supplementary tab.
+
+> Honest notes: real int8 sizes are shown (e.g. Whisper Tiny ≈ 99 MB, Moonshine Base ≈ 106 MB). There is no official EN/HI bilingual Zipformer, so the Zipformer slot ships the real fast **English** model — Hindi is covered by Whisper and SenseVoice.
+
+### 5 · Live Talk never hangs
+- End-to-end Mic/STT → loaded GGUF → active TTS (Phonon / Kokoro / system fallback) → OC-Lily lip-sync. A **watchdog** re-arms on every token and recovers if generation ever goes silent; the **first complete sentence is dispatched to speech immediately** for the fastest possible first words.
+
+### Verified
+Automated headless-Chromium interactive tests click every control and assert state transitions (not just DOM existence), plus the unit suite. Built and signed by GitHub Actions with the persisted v1 keystore.
 
 ### Install
-Download `vani-ai-1.0.1-release.apk`, enable "Install unknown apps", and sideload. First launch: open Model Hub, download a model (e.g. Qwen3.5-0.8B Q4_K_M), tap **Load Model**, then chat or start Live Talk.
-
-> **One-time uninstall required:** v1.0.0 was signed with a one-time CI key that was never persisted, so it cannot be recovered. Android therefore refuses an in-place update from v1.0.0 → v1.0.1 (signature mismatch). **Uninstall v1.0.0 once, then install v1.0.1.** Your chats/models live in app storage and are removed by the uninstall; models can be re-downloaded. From v1.0.1 onward the signing key is persisted in the repository, so **future updates install cleanly in place**. (For stronger key hygiene you may later move the key into a `KEYSTORE_BASE64` Actions secret and remove it from the tree — the workflow already prefers the secret when present.)
+Download `vani-ai-1.2.0-release.apk` and sideload over v1.0.1 (in-place update). Open Model Hub, grab a model (e.g. **LFM2.5-350M Q4_K_M**), tap **Load Model**, then chat or start Live Talk. Install the **Phonon Voice Pack** and an ASR model from Supplementary for the full offline voice loop.

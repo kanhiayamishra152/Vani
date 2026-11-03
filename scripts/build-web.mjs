@@ -59,6 +59,6 @@ if (existsSync(vrmSrc)) {
 
 let commit = 'unknown';
 try { commit = execSync('git rev-parse --short HEAD', { cwd: ROOT }).toString().trim(); } catch {}
-const info = { name: 'Vani AI', version: '1.0.1', versionCode: 2, package: 'ai.vani.app', commit, builtAt: new Date().toISOString() };
+const info = { name: 'Vani AI', version: '1.2.0', versionCode: 3, package: 'ai.vani.app', commit, builtAt: new Date().toISOString() };
 writeFileSync(join(OUT, 'build-info.json'), JSON.stringify(info, null, 2));
 console.log('[build-web] done ->', OUT);

@@ -52,13 +52,15 @@ public final class Bridge {
             case "downloads.resume": DownloadService.command(act, DownloadService.ACTION_RESUME, a.getString("id")); ok(id, null); break;
             case "downloads.cancel": DownloadService.command(act, DownloadService.ACTION_CANCEL, a.getString("id")); ok(id, null); break;
 
-            case "models.list": okArr(id, Models.list(act)); break;
+            case "models.list": okArr(id, Models.scan(act)); break;
             case "models.delete":
                 Models.delete(act, a.getString("id"));
                 act.emit("models.changed", "{}");
                 ok(id, null);
                 break;
             case "models.import": act.main.post(act::launchImport); ok(id, null); break;
+            case "models.lastActive": ok(id, new JSONObject().put("path", Models.getLastActive(act))); break;
+            case "models.setLastActive": Models.setLastActive(act, a.optString("path", "")); ok(id, null); break;
 
             case "llm.load": act.llm.load(a, id); break;
             case "llm.unload": act.llm.unload(id); break;

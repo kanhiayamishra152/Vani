@@ -64,6 +64,11 @@ window.__mockProgress = (id, received, total, speed, state) => {
   if (d) { d.received = received; d.total = total; d.speed = speed; d.state = state; }
   window.VaniBridge._emit('download.progress', { id, received, total, speed, state });
 };
+window.__mockInstall = (entry) => {
+  window.__vaniMock.models = window.__vaniMock.models.filter(m => m.id !== entry.id);
+  window.__vaniMock.models.push(entry);
+  window.VaniBridge._emit('models.changed', {});
+};
 window.VaniNative = {
   invoke(method, argsJson, id) {
     const args = JSON.parse(argsJson || '{}');
@@ -89,7 +94,10 @@ window.VaniNative = {
       case 'tts.configure': ok(null); break;
       case 'tts.speak': ok(null); setTimeout(() => window.VaniBridge._emit('tts.end', {}), 40); break;
       case 'tts.stop': case 'asr.start': case 'asr.stop': case 'asr.feed': case 'asr.pttRelease': ok(null); break;
-      case 'models.delete': case 'models.import': ok(null); break;
+      case 'models.delete': { M.models = M.models.filter(m => m.id !== args.id); ok(null); setTimeout(() => window.VaniBridge._emit('models.changed', {}), 0); break; }
+      case 'models.import': ok(null); break;
+      case 'models.lastActive': ok({ path: M.lastActive || '' }); break;
+      case 'models.setLastActive': M.lastActive = args.path || ''; ok(null); break;
       case 'system.copy': case 'system.openExternal': case 'system.setBackState': case 'system.exit': ok(null); break;
       default: ok(null);
     }
@@ -310,6 +318,73 @@ async function main() {
       await page.evaluate(() => { const m = document.querySelector('#modal-root'); const s = document.querySelector('#sheet-root'); if (m) m.hidden = true; if (s) s.hidden = true; });
       await page.click('#btn-new-chat-top'); await sleep(150);
       check(await responsive(), 'New Chat responds on first tap');
+    });
+
+    await step('v1.2.0: Live singleton re-open (no black screen) + /anime keeps chat clean', async () => {
+      await page.click('#tabbar .tab[data-tab="chat"]'); await sleep(120);
+      await page.click('#btn-live');
+      await page.waitForFunction(() => !document.querySelector('#live-root').hidden, null, { timeout: 5000 });
+      await sleep(300);
+      // fire an action from the sheet (must NOT write a chat bubble)
+      await page.click('#live-cmds');
+      await page.waitForFunction(() => !document.querySelector('#sheet-root').hidden, null, { timeout: 4000 });
+      await page.click('#sheet-root .anime-grid button[data-a="wave"]');
+      await page.waitForFunction(() => document.querySelector('#sheet-root').hidden, null, { timeout: 3000 });
+      // close then RE-OPEN: the persistent singleton must remount, not go black
+      await page.click('#live-close');
+      await page.waitForFunction(() => document.querySelector('#live-root').hidden, null, { timeout: 4000 });
+      await page.click('#btn-live');
+      await page.waitForFunction(() => !document.querySelector('#live-root').hidden, null, { timeout: 5000 });
+      await sleep(300);
+      check(await page.evaluate(() => !!document.querySelector('#live-stage')), 'Live re-opened with stage mounted (singleton remount)');
+      check(await page.evaluate(() => !!document.querySelector('#live-stage canvas')), 'WebGL canvas re-attached on second open (no context loss / black screen)');
+      check(await responsive(), 'responsive after Live re-open');
+      await page.click('#live-close');
+      await page.waitForFunction(() => document.querySelector('#live-root').hidden, null, { timeout: 4000 });
+      const animeBubbles = await page.evaluate(() => [...document.querySelectorAll('#chat-list .msg')].filter(n => /\/anime/.test(n.textContent)).length);
+      check(animeBubbles === 0, `tapping /anime sheet wrote NO chat bubbles (${animeBubbles})`);
+    });
+
+    await step('v1.2.0: persistence — Installed section, 4-voice picker, 7 ASR, add-by-URL', async () => {
+      await page.click('#tabbar .tab[data-tab="models"]');
+      await page.waitForFunction(() => document.querySelector('#screen-models.active'), null, { timeout: 4000 });
+      await page.evaluate(() => {
+        window.__mockInstall({ id: 'inst-llm', modelId: 'lfm25-350m', name: 'LFM2.5-350M (Q4_K_M)', kind: 'llm', quant: 'Q4_K_M', path: '/models/lfm25.gguf', dir: false, sizeBytes: 229312224, engine: 'llm' });
+        window.__mockInstall({ id: 'inst-phonon', modelId: 'phonon', name: 'Phonon Voice Pack (INT8)', kind: 'tts', quant: 'INT8', path: '/models/phonon', dir: true, sizeBytes: 23366127, engine: 'vits' });
+        window.__mockInstall({ id: 'inst-whisper', modelId: 'whisper-tiny', name: 'Whisper Tiny (INT8)', kind: 'asr', quant: 'INT8', path: '/models/whisper-tiny', dir: true, sizeBytes: 103609903, engine: 'whisper' });
+      });
+      await page.waitForFunction(() => !!document.querySelector('.installed-section'), null, { timeout: 4000 });
+      const instRows = await page.evaluate(() => document.querySelectorAll('.installed-section .installed-row').length);
+      check(instRows >= 3, `Downloaded/Installed section lists ${instRows} installed models (>=3)`);
+      check(await page.evaluate(() => /Downloaded \/ Installed/.test(document.querySelector('.installed-section').textContent)), 'section titled "Downloaded / Installed"');
+      await page.click('#hub-seg button[data-tab="main"]'); await sleep(150);
+      check(await page.evaluate(() => !!document.querySelector('[data-model="lfm25-350m"]') && !!document.querySelector('[data-model="lfm25-12b"]')), 'LFM2.5-350M + 1.2B first-class main cards present');
+      check(await page.evaluate(() => { const r = [...document.querySelectorAll('.installed-row')].find(x => /LFM2\.5/.test(x.textContent)); return r && /Use|Active/.test(r.textContent); }), 'installed LLM row exposes Use/Active');
+      // supplementary segment
+      await page.click('#hub-seg button[data-tab="supp"]');
+      await page.waitForFunction(() => document.querySelectorAll('#screen-models .model-card').length >= 11, null, { timeout: 4000 });
+      const suppCount = await page.evaluate(() => document.querySelectorAll('#screen-models .model-card').length);
+      check(suppCount >= 11, `supplementary renders ${suppCount} engine cards (>=11)`);
+      await page.waitForFunction(() => !!document.querySelector('[data-voice-sel="phonon"]'), null, { timeout: 4000 });
+      const voiceOpts = await page.evaluate(() => [...document.querySelectorAll('[data-voice-sel="phonon"] option')].map(o => o.value));
+      check(voiceOpts.length === 4, `Phonon card has a 4-voice selector (${voiceOpts.join(',')})`);
+      check(await page.evaluate(() => !!document.querySelector('[data-voice-preview="phonon"]')), 'Phonon card has Preview Voice');
+      await page.selectOption('[data-voice-sel="phonon"]', '92'); await sleep(100);
+      const sid = await page.evaluate(() => JSON.parse(localStorage.getItem('vani.v1.settings')).ttsSid);
+      check(sid === 92, 'choosing a voice persists ttsSid=92 (Orion/Aarav)');
+      await page.click('[data-voice-preview="phonon"]'); await sleep(150);
+      check(await responsive(), 'Preview Voice click is responsive');
+      const titles = await page.evaluate(() => [...document.querySelectorAll('#screen-models .model-card .model-title')].map(n => n.textContent));
+      for (const want of ['Whisper Tiny', 'Whisper Base', 'Whisper Small', 'Moonshine Tiny', 'Moonshine Base', 'SenseVoice', 'Zipformer']) {
+        check(titles.some(t => t.includes(want)), `ASR engine present: ${want}`);
+      }
+      // add-by-URL/repo dialog opens with its own fields (no id collision)
+      await page.click('#supp-url');
+      await page.waitForFunction(() => !document.querySelector('#modal-root').hidden && !!document.querySelector('#supp-add-url'), null, { timeout: 3000 });
+      check(await page.evaluate(() => !!document.querySelector('#supp-add-cat') && !!document.querySelector('#supp-add-engine')), 'Add TTS/ASR dialog has type + engine fields');
+      await page.evaluate(() => window.VaniBridge._emit('modal.close', {}));
+      await page.waitForFunction(() => document.querySelector('#modal-root').hidden, null, { timeout: 3000 });
+      check(await responsive(), 'Models hub responsive after persistence checks');
     });
 
     await step('Final integrity', async () => {
