@@ -2,7 +2,7 @@ name: Build Vani AI APK
 
 on:
   push:
-    branches: [main]
+    branches: [main, "arena/**"]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -140,7 +140,7 @@ jobs:
         run: bash scripts/upload-gofile.sh dist/vani-ai-1.0.0-release.apk dist/vani-ai-1.0.0-source.zip
 
       - name: Publish GitHub Release v1.0.0
-        if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && inputs.publish_release)
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_release)
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v1.0.0
