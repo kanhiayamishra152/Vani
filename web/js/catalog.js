@@ -167,7 +167,7 @@ export const SUPP_MODELS = [
     desc: 'Genuine ~8 MB ultra-light neural TTS (NOT the 28 MB pack). Four learned voices — Aria/Vani, Meera/Nova, Aarav/Orion, Kabir/Echo — with instant preview. The default Live Talk voice.',
     badges: ['TTS', '< 9 MB', '4 Voices', 'Neural'],
     voices: ULTRALIGHT_VOICES, defaultVoice: 0,
-    variants: { INT8: { file: 'phonon-ultralight-8m-int8.tar.bz2', size: 7374491 } },
+    variants: { INT8: { file: 'phonon-ultralight-8m-int8.tar.bz2', size: 7374926 } },
     defaultVariant: 'INT8',
     url(v) { return `https://github.com/kanhiayamishra152/Vani/releases/download/phonon-ultralight-v1/${this.variants[v].file}`; },
   },

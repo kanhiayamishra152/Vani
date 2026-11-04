@@ -33,17 +33,26 @@
         <div id="chat-empty" hidden></div>
       </div>
       <div id="composer">
+        <div id="composer-status" class="composer-status" role="status" hidden></div>
         <div id="attach-preview" hidden></div>
         <div class="composer-bar">
-          <button id="btn-attach" class="icon-btn" aria-label="Attach image"></button>
-          <div class="composer-input-wrap">
-            <textarea id="composer-input" rows="1" placeholder="Message Vani AI" autocomplete="off"></textarea>
+          <div class="composer-input-row">
+            <div class="composer-input-wrap">
+              <textarea id="composer-input" rows="1" placeholder="Message Vani AI" autocomplete="off"></textarea>
+            </div>
+            <div id="composer-top-actions" class="composer-top-actions">
+              <button id="btn-live" class="icon-btn live" aria-label="Open Live Talk" title="Live Mode"></button>
+              <button id="btn-stop" class="icon-btn stop" aria-label="Stop generating" hidden></button>
+              <button id="btn-send" class="icon-btn send" aria-label="Send" hidden></button>
+            </div>
           </div>
-          <button id="btn-think" class="think-toggle" aria-label="Toggle model thinking" aria-pressed="true" title="Thinking: ON"></button>
-          <button id="btn-mic" class="icon-btn" aria-label="Dictate"></button>
-          <button id="btn-stop" class="icon-btn stop" aria-label="Stop generating" hidden></button>
-          <button id="btn-send" class="icon-btn send" aria-label="Send" hidden></button>
-          <button id="btn-live" class="icon-btn live" aria-label="Open Live Talk"></button>
+          <div class="composer-actions" aria-label="Composer actions">
+            <button id="btn-attach" class="icon-btn composer-action" aria-label="Attach image" title="Add image"></button>
+            <button id="btn-think" class="think-toggle composer-action" aria-label="Toggle model thinking" aria-pressed="true" title="Thinking: ON"></button>
+            <button id="btn-auto-tts" class="icon-btn auto-tts composer-action" aria-label="Audio Creation: off" aria-pressed="false" title="Audio Creation: OFF"></button>
+            <button id="btn-mic" class="icon-btn composer-action" aria-label="Dictate" title="Microphone"></button>
+            <div id="composer-action-primary" class="composer-action-primary"></div>
+          </div>
         </div>
       </div>
     </section>

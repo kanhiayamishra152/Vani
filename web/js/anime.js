@@ -187,10 +187,12 @@ export function sampleAction(name, p) {
   if (!def) return null;
   const bones = {};
   for (const [bone, track] of Object.entries(def.bones || {})) {
-    const off = sampleTrack(track, p);
-    // Apply the empirically-verified world-space sign for this bone/axis.
+    let off = sampleTrack(track, p);
+    // Keyframes at p=0/1 come directly from ANIME_DEFS. Clone before applying
+    // axis signs so repeated actions never mutate the canonical rig tracks.
     const map = SIGN_MAP[bone];
     if (map && off) {
+      off = { ...off };
       for (const [axis, key] of Object.entries(map)) {
         if (off[axis]) off[axis] *= AXES[key];
       }

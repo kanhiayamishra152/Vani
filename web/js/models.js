@@ -6,7 +6,10 @@ import { invoke, on, hasNative, emitLocal } from './bridge.js';
 import { settings, setSetting } from './store.js';
 import { MAIN_MODELS, SUPP_MODELS } from './catalog.js';
 import { llm, loadModel, unloadModel, isReady } from './inference.js';
-import { configureVoice, previewVoice } from './voice.js';
+import {
+  configureVoice, previewVoice, refreshSpeechStatus, speechRuntime,
+  isVoiceLoaded, isAsrLoaded, unloadVoice, loadAsrModel, unloadAsrModel,
+} from './voice.js';
 
 let tab = 'main';
 let cat = 'all';
@@ -25,6 +28,7 @@ export async function refreshModels() {
   if (!hasNative()) return;
   try {
     [installed, downloads] = await Promise.all([invoke('models.list'), invoke('downloads.list')]);
+    await refreshSpeechStatus();
   } catch { installed = []; downloads = []; }
   if ($('#screen-models').classList.contains('active')) renderHub();
 }
@@ -40,6 +44,7 @@ export function renderHub() {
       <button data-tab="main" class="${tab === 'main' ? 'active' : ''}">Main Models</button>
       <button data-tab="supp" class="${tab === 'supp' ? 'active' : ''}">Supplementary</button>
     </div>
+    ${llm.info?.omni ? `<div class="omni-notice">${icon('alert')}<span>Omni isolation is active. Unload LFM3-Omni-2B before loading another LLM, TTS, or ASR model.</span></div>` : ''}
     <div class="pills" id="hub-pills">
       ${cats.map(([id, label]) => `<button class="pill${cat === id ? ' active' : ''}" data-cat="${id}">${label}</button>`).join('')}
     </div>
@@ -154,17 +159,20 @@ function paintAction(card, m, q, inst, dl, mmDl, wantMm) {
   slot.innerHTML = ''; dlSlot.innerHTML = '';
   if (inst) {
     const active = isReady() && llm.info?.modelPath === inst.path;
+    const blocked = !!llm.info?.omni && !active && m.id !== 'lfm3-omni-2b';
     const b = el('button', active ? 'btn-secondary' : 'btn-primary',
-      active ? `${icon('check')}<span>Active · Unload</span>` : `${icon('bolt')}<span>Load Model</span>`);
+      active ? `${icon('check')}<span>Unload</span>` : blocked ? `${icon('alert')}<span>Omni active</span>` : `${icon('bolt')}<span>Load Model</span>`);
+    b.dataset.action = active ? 'unload' : 'load';
+    b.disabled = blocked;
     b.addEventListener('click', async () => {
-      if (active) { await unloadModel(); toast('Model unloaded'); renderHub(); return; }
-      toast('Loading ' + m.title + '…');
       try {
+        if (active) { await unloadModel(); toast('Model unloaded from RAM; files kept'); renderHub(); return; }
+        toast('Loading ' + m.title + '…');
         const mm = installed.find(x => x.modelId === m.id && x.kind === 'mmproj');
         await loadModel(inst, mm);
         toast(m.title + ' ready');
         emitLocal('nav', 'chat');
-      } catch (e) { toast('Load failed: ' + e.message); }
+      } catch (e) { toast((active ? 'Unload failed: ' : 'Load failed: ') + e.message); }
       renderHub();
     });
     slot.appendChild(b);
@@ -180,12 +188,12 @@ async function startMainDownload(m, q, wantMm) {
   if (!hasNative()) { toast('Downloads need the Android app'); return; }
   try {
     await invoke('downloads.start', {
-      id: `${m.id}:${q}`, url: m.url(q), fileName: m.quants[q].file, total: m.quants[q].size,
+      id: `${m.id}:${q}`, groupId: `${m.id}:${q}`, url: m.url(q), fileName: m.quants[q].file, total: m.quants[q].size,
       kind: 'llm', modelId: m.id, quant: q, name: `${m.title} (${q})`, extract: false,
     });
     if (wantMm && m.mmproj && !installed.find(x => x.modelId === m.id && x.kind === 'mmproj') && !dlFor(`${m.id}:mmproj`)) {
       await invoke('downloads.start', {
-        id: `${m.id}:mmproj`, url: m.mmprojUrl(), fileName: `${m.id}-${m.mmproj.file}`, total: m.mmproj.size,
+        id: `${m.id}:mmproj`, groupId: `${m.id}:${q}`, url: m.mmprojUrl(), fileName: `${m.id}-${m.mmproj.file}`, total: m.mmproj.size,
         kind: 'mmproj', modelId: m.id, quant: 'F16', name: `${m.title} vision projector`, extract: false,
       });
     }
@@ -195,9 +203,8 @@ async function startMainDownload(m, q, wantMm) {
 
 function suppCard(m) {
   const card = el('div', 'model-card');
+  card.dataset.model = m.id;
   const inst = installedSupp(m.id);
-  const isActiveVoice = m.cat === 'tts' && settings.ttsModelId === m.id;
-  const isActiveAsr = m.cat === 'asr' && settings.asrModelId === m.id;
   const v = variantOf(m);
   const variant = m.variants[v];
   const dl = dlFor(`${m.id}:${v}`);
@@ -241,21 +248,17 @@ function suppCard(m) {
   const slot = card.querySelector('[data-supp-action]');
   const dlSlot = card.querySelector(`[data-dl-slot="${m.id}:${v}"]`);
   if (inst) {
-    const active = isActiveVoice || isActiveAsr;
+    const active = m.cat === 'tts' ? isVoiceLoaded(inst) : isAsrLoaded(inst);
+    const loading = m.cat === 'tts'
+      ? speechRuntime.tts.state === 'loading' && speechRuntime.tts.path === inst.path
+      : speechRuntime.asr.state === 'loading' && speechRuntime.asr.path === inst.path;
+    const blocked = !!llm.info?.omni && !active;
     const b = el('button', active ? 'btn-secondary' : 'btn-primary',
-      active ? `${icon('check')}<span>Active</span>` : `${icon('bolt')}<span>Activate</span>`);
-    b.addEventListener('click', () => {
-      if (m.cat === 'tts') {
-        setSetting('ttsEngine', m.engine); setSetting('ttsModelId', m.id);
-        if (m.voices) {
-          const ids = m.voices.map(x => x.id);
-          if (!ids.includes(settings.ttsSid)) setSetting('ttsSid', m.defaultVoice ?? ids[0]);
-        }
-        configureVoice();
-        toast(m.title + ' is now the voice');
-      } else { setSetting('asrEngine', m.engine); setSetting('asrModelId', m.id); toast(m.title + ' will power speech recognition'); }
-      renderHub();
-    });
+      active ? `${icon('check')}<span>Unload</span>` : loading ? `<span>Loading…</span>`
+        : blocked ? `${icon('alert')}<span>Omni active</span>` : `${icon('bolt')}<span>Load Model</span>`);
+    b.dataset.action = active ? 'unload' : 'load';
+    b.disabled = blocked || loading;
+    b.addEventListener('click', () => toggleSupplementary(m, inst));
     slot.appendChild(b);
   } else if (dl) {
     renderProgress(dlSlot, dl);
@@ -280,6 +283,38 @@ function suppCard(m) {
   return card;
 }
 
+async function toggleSupplementary(m, inst) {
+  const active = m.cat === 'tts' ? isVoiceLoaded(inst) : isAsrLoaded(inst);
+  try {
+    if (m.cat === 'tts') {
+      if (active) {
+        await unloadVoice();
+        toast('Voice unloaded from RAM; files kept');
+      } else {
+        setSetting('ttsEngine', m.engine); setSetting('ttsModelId', m.id);
+        if (m.voices) {
+          const ids = m.voices.map(x => x.id);
+          if (!ids.includes(settings.ttsSid)) setSetting('ttsSid', m.defaultVoice ?? ids[0]);
+        }
+        await configureVoice();
+        toast(m.title + ' loaded');
+      }
+    } else {
+      if (active) {
+        await unloadAsrModel();
+        toast('ASR unloaded from RAM; files kept');
+      } else {
+        await loadAsrModel(inst);
+        setSetting('asrEngine', m.engine); setSetting('asrModelId', m.id);
+        toast(m.title + ' loaded');
+      }
+    }
+  } catch (e) {
+    toast((active ? 'Unload failed: ' : 'Load failed: ') + (e.message || 'native error'));
+  }
+  renderHub();
+}
+
 /** Voice selector + preview for installed multi-speaker TTS packs. */
 function wireVoicePicker(card, m, inst) {
   const sel = card.querySelector(`[data-voice-sel="${m.id}"]`);
@@ -294,8 +329,8 @@ function wireVoicePicker(card, m, inst) {
   card.querySelector(`[data-voice-preview="${m.id}"]`)?.addEventListener('click', async () => {
     const sid = parseInt(sel.value, 10);
     setSetting('ttsEngine', m.engine); setSetting('ttsModelId', m.id); setSetting('ttsSid', sid);
-    try { await configureVoice(); } catch {}
-    previewVoice('Hello! This is my voice. How does it sound?', sid);
+    try { await previewVoice('Hello! This is my voice. How does it sound?', sid); }
+    catch (e) { toast(e.message || 'Voice preview failed'); }
     renderHub();
   });
 }
@@ -312,10 +347,16 @@ function customCard(dl, inst) {
   const slot = card.querySelector('[data-supp-action]');
   if (inst) {
     const active = isReady() && llm.info?.modelPath === inst.path;
-    const b = el('button', active ? 'btn-secondary' : 'btn-primary', active ? `${icon('check')}<span>Active · Unload</span>` : `${icon('bolt')}<span>Load Model</span>`);
+    const blocked = !!llm.info?.omni && !active && !/lfm3[-_]omni/i.test(`${inst.path} ${inst.name}`);
+    const b = el('button', active ? 'btn-secondary' : 'btn-primary', active ? `${icon('check')}<span>Unload</span>`
+      : blocked ? `${icon('alert')}<span>Omni active</span>` : `${icon('bolt')}<span>Load Model</span>`);
+    b.disabled = blocked;
+    b.dataset.action = active ? 'unload' : 'load';
     b.addEventListener('click', async () => {
-      if (active) { await unloadModel(); renderHub(); return; }
-      try { await loadModel(inst); toast('Model ready'); emitLocal('nav', 'chat'); } catch (e) { toast(e.message); }
+      try {
+        if (active) { await unloadModel(); toast('Model unloaded from RAM; files kept'); renderHub(); return; }
+        await loadModel(inst); toast('Model ready'); emitLocal('nav', 'chat');
+      } catch (e) { toast(e.message); }
       renderHub();
     });
     slot.appendChild(b);
@@ -339,30 +380,35 @@ function installedRow(m) {
   const row = el('div', 'installed-row');
   const isLlm = m.kind === 'llm' || m.kind === 'gguf';
   const active = isLlm ? (isReady() && llm.info?.modelPath === m.path)
-    : (m.kind === 'tts' ? settings.ttsModelId === m.modelId : settings.asrModelId === m.modelId);
+    : (m.kind === 'tts' ? isVoiceLoaded(m) : isAsrLoaded(m));
+  const blocked = !!llm.info?.omni && !active && (isLlm ? !/lfm3[-_]omni/i.test(`${m.path} ${m.name}`) : true);
   const kindLabel = isLlm ? 'LLM' : (m.kind || '').toUpperCase();
+  row.dataset.model = m.modelId || m.id;
   row.innerHTML = `
     <div class="installed-info">
       <div class="installed-name">${esc(m.name || m.modelId)}</div>
-      <div class="installed-meta">${esc(kindLabel)}${m.engine ? ' · ' + esc(m.engine) : ''} · ${fmtBytes(m.sizeBytes || 0)}</div>
+      <div class="installed-meta">${esc(kindLabel)}${m.engine ? ' · ' + esc(m.engine) : ''} · ${fmtBytes(m.sizeBytes || 0)} · ${active ? 'In RAM' : 'On disk'}</div>
     </div>
-    <button class="btn-secondary btn-sm" data-use>${active ? `${icon('check')}<span>Active</span>` : `${icon('bolt')}<span>Use</span>`}</button>
+    <button class="btn-secondary btn-sm" data-use data-action="${active ? 'unload' : 'load'}" ${blocked ? 'disabled' : ''}>${active ? `${icon('check')}<span>Unload</span>` : blocked ? `<span>Omni active</span>` : `${icon('bolt')}<span>Load Model</span>`}</button>
     <button class="icon-btn danger" data-del style="width:32px;height:32px">${icon('trash')}</button>`;
   row.querySelector('[data-use]').addEventListener('click', async () => {
-    if (isLlm) {
-      if (active) { await unloadModel(); renderHub(); return; }
-      try {
+    try {
+      if (isLlm) {
+        if (active) { await unloadModel(); toast('Model unloaded from RAM; files kept'); return; }
         const mm = installed.find(x => x.modelId === m.modelId && x.kind === 'mmproj');
         await loadModel(m, mm); toast('Model ready'); emitLocal('nav', 'chat');
-      } catch (e) { toast('Load failed: ' + e.message); }
-      renderHub();
-    } else if (m.kind === 'tts') {
-      setSetting('ttsEngine', m.engine || 'vits'); setSetting('ttsModelId', m.modelId);
-      configureVoice(); toast((m.name || m.modelId) + ' is now the voice'); renderHub();
-    } else {
-      setSetting('asrEngine', m.engine || 'whisper'); setSetting('asrModelId', m.modelId);
-      toast((m.name || m.modelId) + ' will power speech recognition'); renderHub();
-    }
+      } else if (m.kind === 'tts') {
+        if (active) { await unloadVoice(); toast('Voice unloaded from RAM; files kept'); return; }
+        setSetting('ttsEngine', m.engine || 'vits'); setSetting('ttsModelId', m.modelId);
+        await configureVoice(); toast((m.name || m.modelId) + ' loaded');
+      } else {
+        if (active) { await unloadAsrModel(); toast('ASR unloaded from RAM; files kept'); return; }
+        await loadAsrModel(m);
+        setSetting('asrEngine', m.engine || 'whisper'); setSetting('asrModelId', m.modelId);
+        toast((m.name || m.modelId) + ' loaded');
+      }
+    } catch (e) { toast((active ? 'Unload failed: ' : 'Load failed: ') + e.message); }
+    finally { renderHub(); }
   });
   row.querySelector('[data-del]').addEventListener('click', () => deleteModel(m.id, m.name || m.modelId));
   return row;
@@ -429,7 +475,7 @@ function renderProgress(slot, dl) {
       <div class="dl-actions">
         <button data-act="pause" ${dl.state !== 'downloading' && dl.state !== 'queued' ? 'hidden' : ''}>${icon('pause')}<span>Pause</span></button>
         <button data-act="resume" ${dl.state !== 'paused' ? 'hidden' : ''}>${icon('play')}<span>Resume</span></button>
-        <button data-act="cancel" class="cancel" ${dl.state === 'extracting' || dl.state === 'finalizing' ? 'hidden' : ''}>${icon('x')}<span>Cancel</span></button>
+        <button data-act="cancel" class="cancel" ${dl.state === 'finalizing' ? 'hidden' : ''}>${icon('x')}<span>Cancel</span></button>
       </div>
       ${dl.error ? `<div class="muted small mt8">${esc(dl.error)}</div>` : ''}
     </div>`;
@@ -439,7 +485,7 @@ function renderProgress(slot, dl) {
       if (act === 'cancel') {
         emitLocal('modal.open', {
           title: 'Cancel download?', body: '<p class="muted small">Progress will be discarded. You can also pause and resume later from the exact byte offset.</p>',
-          actions: [{ label: 'Keep' }, { label: 'Cancel download', danger: true, fn: async () => { await invoke('downloads.cancel', { id: dl.id }); refreshModels(); } }],
+          actions: [{ label: 'Keep' }, { label: 'Cancel download', danger: true, fn: async () => { await invoke('downloads.cancel', { id: dl.id, groupId: dl.groupId || '' }); refreshModels(); } }],
         });
       } else { await invoke(`downloads.${act}`, { id: dl.id }); }
     } catch (e) { toast(e.message); }
@@ -463,7 +509,7 @@ function paintProgress(p) {
   node.querySelector('[data-dl-pct]').textContent = pct.toFixed(0) + '%';
   node.querySelector('[data-dl-speed]').textContent = dlSpeedLabel(p);
   const busy = p.state === 'downloading' || p.state === 'queued';
-  const finalizing = p.state === 'extracting' || p.state === 'finalizing';
+  const finalizing = p.state === 'finalizing';
   const pause = node.querySelector('[data-act="pause"]');
   const resume = node.querySelector('[data-act="resume"]');
   const cancel = node.querySelector('[data-act="cancel"]');
@@ -505,8 +551,10 @@ function deleteModel(id, title) {
     actions: [
       { label: 'Cancel' },
       { label: 'Delete', danger: true, fn: async () => {
-        const active = isReady() && llm.info?.modelPath === installed.find(m => m.id === id)?.path;
-        if (active) await unloadModel();
+        const entry = installed.find(m => m.id === id);
+        if (entry && isReady() && llm.info?.modelPath === entry.path) await unloadModel();
+        else if (entry?.kind === 'tts' && isVoiceLoaded(entry)) await unloadVoice();
+        else if (entry?.kind === 'asr' && isAsrLoaded(entry)) await unloadAsrModel();
         await invoke('models.delete', { id });
         toast('Model deleted');
         refreshModels();
@@ -522,6 +570,7 @@ export function initModels() {
   on('download.state', () => { refreshModels(); });
   on('models.changed', refreshModels);
   on('llm.statusChanged', () => { if ($('#screen-models').classList.contains('active')) renderHub(); });
+  on('speech.statusChanged', () => { if ($('#screen-models').classList.contains('active')) renderHub(); });
   on('settings.changed', () => { if ($('#screen-models').classList.contains('active')) renderHub(); });
   on('tab.changed', t => { if (t === 'models') refreshModels(); });
   refreshModels().then(() => {

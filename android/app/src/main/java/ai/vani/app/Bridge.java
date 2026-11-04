@@ -58,7 +58,7 @@ public final class Bridge {
                 break;
             case "downloads.pause": DownloadService.command(act, DownloadService.ACTION_PAUSE, a.getString("id")); ok(id, null); break;
             case "downloads.resume": DownloadService.command(act, DownloadService.ACTION_RESUME, a.getString("id")); ok(id, null); break;
-            case "downloads.cancel": DownloadService.command(act, DownloadService.ACTION_CANCEL, a.getString("id")); ok(id, null); break;
+            case "downloads.cancel": DownloadService.command(act, DownloadService.ACTION_CANCEL, a.getString("id"), a.optString("groupId", "")); ok(id, null); break;
 
             case "models.list": okArr(id, Models.scan(act)); break;
             case "models.delete":
@@ -70,17 +70,21 @@ public final class Bridge {
             case "models.lastActive": ok(id, new JSONObject().put("path", Models.getLastActive(act))); break;
             case "models.setLastActive": Models.setLastActive(act, a.optString("path", "")); ok(id, null); break;
 
-            case "llm.load": act.llm.load(a, id); break;
+            case "llm.load": act.loadLlm(a, id); break;
             case "llm.unload": act.llm.unload(id); break;
             case "llm.status": ok(id, act.llm.status()); break;
             case "llm.generate": act.llm.generate(a, id); break;
             case "llm.stop": act.llm.stop(a, id); break;
 
-            case "tts.configure": act.speech.configureTts(a, id); break;
+            case "speech.status": ok(id, act.speech.status()); break;
+            case "tts.configure": act.configureTts(a, id); break;
+            case "tts.unload": act.speech.unloadTts(id); break;
             case "tts.speak": act.speech.speak(a, id); break;
             case "tts.stop": act.speech.stopTts(); ok(id, null); break;
 
-            case "asr.start": act.speech.startAsr(a, id); break;
+            case "asr.load": act.loadAsr(a, id, false); break;
+            case "asr.unload": act.speech.unloadAsr(id); break;
+            case "asr.start": act.loadAsr(a, id, true); break;
             case "asr.stop": act.speech.stopAsr(); ok(id, null); break;
             case "asr.feed": act.speech.feed(a.getString("pcm")); ok(id, null); break;
             case "asr.pttRelease": act.speech.pttRelease(); ok(id, null); break;
@@ -97,15 +101,26 @@ public final class Bridge {
             }
 
             case "system.copy": {
-                ClipboardManager cm = (ClipboardManager) act.getSystemService(Context.CLIPBOARD_SERVICE);
-                cm.setPrimaryClip(ClipData.newPlainText("Vani AI", a.getString("text")));
-                ok(id, null);
+                String text = a.getString("text");
+                act.main.post(() -> {
+                    try {
+                        ClipboardManager cm = (ClipboardManager) act.getSystemService(Context.CLIPBOARD_SERVICE);
+                        cm.setPrimaryClip(ClipData.newPlainText("Vani AI", text));
+                        ok(id, null);
+                    } catch (Exception e) { err(id, e.getMessage()); }
+                });
                 break;
             }
-            case "system.openExternal":
-                act.startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(a.getString("url"))));
-                ok(id, null);
+            case "system.openExternal": {
+                String url = a.getString("url");
+                act.main.post(() -> {
+                    try {
+                        act.startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+                        ok(id, null);
+                    } catch (Exception e) { err(id, e.getMessage()); }
+                });
                 break;
+            }
             case "system.setBackState":
                 act.setJsHandlesBack(a.optBoolean("handled", false));
                 ok(id, null);

@@ -27,6 +27,7 @@ on('llm.status', applyStatus);
 
 export async function loadModel(entry, mmprojEntry) {
   if (!hasNative()) throw new Error('Install the Android app to load models');
+  const omni = /lfm3[-_]omni/i.test(`${entry.path || ''} ${entry.name || ''}`);
   llm.state = 'loading'; llm.error = null;
   emitLocal('llm.statusChanged', { ...llm });
   try {
@@ -34,15 +35,15 @@ export async function loadModel(entry, mmprojEntry) {
       path: entry.path,
       name: entry.name || entry.fileName,
       mmprojPath: mmprojEntry?.path || null,
-      nCtx: settings.nCtx,
+      nCtx: omni ? Math.min(settings.nCtx, 2048) : settings.nCtx,
       nThreads: settings.threads,
-      nBatch: 512,
+      nBatch: omni ? 128 : 512,
       flashAttn: !!settings.flashAttn,
     });
     applyStatus(s);
     return s;
   } catch (e) {
-    llm.state = 'error'; llm.error = e.message;
+    llm.state = 'error'; llm.info = null; llm.error = e.message;
     emitLocal('llm.statusChanged', { ...llm });
     throw e;
   }
@@ -50,8 +51,13 @@ export async function loadModel(entry, mmprojEntry) {
 
 export async function unloadModel() {
   if (!hasNative()) return;
-  try { await invoke('llm.unload'); } catch {}
-  applyStatus({ state: 'idle' });
+  try {
+    const status = await invoke('llm.unload');
+    applyStatus(status?.state ? status : { state: 'idle' });
+  } catch (e) {
+    await refreshStatus();
+    throw e;
+  }
 }
 
 /** Auto-reload the last active model on launch (persisted natively). */
@@ -73,7 +79,10 @@ export async function autoRestore() {
 
 /** Budget history so prompt + generation fits the context window. */
 export function buildContextMessages(history, systemText, reserve) {
-  const budget = Math.max(512, settings.nCtx - reserve - 256);
+  // Use the native context actually allocated (Omni may be capped below the
+  // global setting), not a larger preference that would overflow the prompt.
+  const nativeCtx = llm.info?.nCtx || settings.nCtx;
+  const budget = Math.max(512, nativeCtx - reserve - 256);
   const msgs = [];
   let used = estTokens(systemText);
   for (let i = history.length - 1; i >= 0; i--) {

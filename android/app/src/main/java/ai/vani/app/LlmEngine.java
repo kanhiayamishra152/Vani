@@ -5,13 +5,14 @@ import android.util.Log;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
  * Vani AI — llama.cpp engine wrapper (JNI).
  * Load / unload run on a serialized executor; generation streams tokens from
- * a dedicated thread so stop() (barge-in) is always instant.
+ * a dedicated thread so stop() (barge-in) never waits on the WebView thread.
  */
 public final class LlmEngine {
     private static final String TAG = "VaniLlm";
@@ -36,30 +37,60 @@ public final class LlmEngine {
     private final MainActivity act;
     private final ExecutorService exec = Executors.newSingleThreadExecutor();
     private final Object genLock = new Object();
-    private long handle = 0;
-    private String modelPath = null;
-    private String modelName = null;
-    private String mmprojPath = null;
+    private volatile long handle = 0;
+    private volatile String modelPath = null;
+    private volatile String modelName = null;
+    private volatile String mmprojPath = null;
     private volatile Thread genThread = null;
-    private volatile String currentGenId = null;
     private volatile boolean loading = false;
+    private volatile boolean loadingOmni = false;
+    private volatile boolean omni = false;
+    private volatile String loadingPath = null;
+    private volatile String loadingName = null;
+    private volatile boolean shutdownRequested = false;
 
     LlmEngine(MainActivity act) { this.act = act; }
+
+    static boolean isOmniRequest(JSONObject a) {
+        return isOmniIdentity(a.optString("path", ""), a.optString("name", ""));
+    }
+
+    private static boolean isOmniIdentity(String path, String name) {
+        String identity = ((path == null ? "" : path) + " " + (name == null ? "" : name)).toLowerCase(Locale.ROOT);
+        return identity.contains("lfm3-omni") || identity.contains("lfm3_omni");
+    }
+
+    /** True both while Omni is allocating and after it becomes ready. */
+    boolean isOmni() { return loading ? loadingOmni : (handle != 0 && omni); }
+
+    private static int clamp(int value, int min, int max) { return Math.max(min, Math.min(max, value)); }
 
     JSONObject status() {
         JSONObject j = new JSONObject();
         try {
-            if (loading) { j.put("state", "loading"); return j; }
+            if (loading) {
+                j.put("state", "loading");
+                j.put("modelPath", loadingPath);
+                j.put("name", loadingName);
+                j.put("omni", loadingOmni);
+                return j;
+            }
             if (handle == 0 || !nativeOk) { j.put("state", "idle"); return j; }
-            JSONObject n = new JSONObject(nativeStatus(handle));
+            final JSONObject n;
+            synchronized (genLock) {
+                if (handle == 0) { j.put("state", "idle"); return j; }
+                n = new JSONObject(nativeStatus(handle));
+            }
             j.put("state", "ready");
             j.put("modelPath", modelPath);
             j.put("name", modelName);
+            j.put("omni", omni);
             for (java.util.Iterator<String> it = n.keys(); it.hasNext(); ) {
                 String k = it.next();
                 j.put(k, n.get(k));
             }
-        } catch (Exception e) {
+        } catch (Throwable e) {
+            Log.w(TAG, "status", e);
             try { j.put("state", "idle"); } catch (Exception ignored) {}
         }
         return j;
@@ -67,33 +98,63 @@ public final class LlmEngine {
 
     void load(JSONObject a, String id) {
         if (!nativeOk) { fail(id, "Native engine missing from this build"); return; }
-        loading = true;
+        if (shutdownRequested) { fail(id, "Engine is shutting down"); return; }
+        final boolean requestedOmni = isOmniRequest(a);
+        final String requestedPath = a.optString("path", "");
+        final String requestedName = a.optString("name", new java.io.File(requestedPath).getName());
+        synchronized (this) {
+            if (loading) { fail(id, "A model is already loading; wait for it to finish"); return; }
+            loading = true;
+            loadingOmni = requestedOmni;
+            loadingPath = requestedPath;
+            loadingName = requestedName;
+        }
         act.emit("llm.status", status().toString());
         exec.submit(() -> {
             try {
-                stopGenerationInternal();
+                if (!stopGenerationInternal()) {
+                    throw new IllegalStateException("The previous generation could not stop; the current model was left loaded");
+                }
                 synchronized (genLock) {
                     if (handle != 0) { nativeFree(handle); handle = 0; }
+                    modelPath = null; modelName = null; mmprojPath = null; omni = false;
                 }
                 String path = a.getString("path");
                 String mmproj = a.optString("mmprojPath", null);
-                long h = nativeLoad(path, mmproj == null ? "" : mmproj,
-                        a.optInt("nCtx", 4096), a.optInt("nThreads", 4),
-                        a.optInt("nBatch", 512), a.optBoolean("flashAttn", true));
-                loading = false;
-                if (h == 0) {
-                    fail(id, "Failed to load model (unsupported or corrupt GGUF)");
-                    act.emit("llm.status", status().toString());
-                    return;
+                int nCtx = clamp(a.optInt("nCtx", requestedOmni ? 2048 : 4096), 512, 32768);
+                int nBatch = clamp(a.optInt("nBatch", requestedOmni ? 128 : 512), 32, 512);
+                int nThreads = clamp(a.optInt("nThreads", 4), 1, 8);
+                if (requestedOmni) {
+                    // A 2B omni model plus its projector is already a large mobile
+                    // allocation. Keep context/batch bounded regardless of UI settings.
+                    nCtx = Math.min(nCtx, 2048);
+                    nBatch = Math.min(nBatch, 128);
                 }
-                synchronized (genLock) { handle = h; modelPath = path; modelName = a.optString("name", new java.io.File(path).getName()); mmprojPath = mmproj; }
+                if (shutdownRequested) return;
+                long h = nativeLoad(path, mmproj == null ? "" : mmproj,
+                        nCtx, nThreads, nBatch, a.optBoolean("flashAttn", true));
+                if (h == 0) throw new IllegalStateException("Failed to load model (unsupported, corrupt, or insufficient free RAM)");
+                synchronized (genLock) {
+                    if (shutdownRequested) {
+                        nativeFree(h);
+                        return;
+                    }
+                    handle = h; modelPath = path; modelName = requestedName;
+                    mmprojPath = mmproj; omni = requestedOmni;
+                }
                 Models.setLastActive(act, path);
-                JSONObject st = status();
-                act.resolve(id, true, st.toString());
-                act.emit("llm.status", st.toString());
-            } catch (Exception e) {
+                loading = false; loadingOmni = false; loadingPath = null; loadingName = null;
+                act.resolve(id, true, status().toString());
+            } catch (Throwable e) {
+                // JNI allocation failures are reported as request errors rather
+                // than escaping the executor and terminating the app process.
+                Log.e(TAG, "model load", e);
+                fail(id, e.getMessage() == null ? "Model allocation failed" : e.getMessage());
+            } finally {
                 loading = false;
-                fail(id, e.getMessage());
+                loadingOmni = false;
+                loadingPath = null;
+                loadingName = null;
                 act.emit("llm.status", status().toString());
             }
         });
@@ -101,28 +162,37 @@ public final class LlmEngine {
 
     void unload(String id) {
         exec.submit(() -> {
-            stopGenerationInternal();
-            synchronized (genLock) {
-                if (handle != 0) { nativeFree(handle); handle = 0; modelPath = null; modelName = null; }
+            try {
+                if (!stopGenerationInternal()) {
+                    fail(id, "Generation is still stopping; model memory was not freed unsafely. Try Unload again.");
+                    return;
+                }
+                synchronized (genLock) {
+                    if (handle != 0) { nativeFree(handle); handle = 0; }
+                    modelPath = null; modelName = null; mmprojPath = null; omni = false;
+                }
+                Models.setLastActive(act, "");
+                if (id != null) act.resolve(id, true, status().toString());
+            } catch (Throwable t) {
+                Log.e(TAG, "model unload", t);
+                fail(id, t.getMessage() == null ? "Model cleanup failed safely" : t.getMessage());
+            } finally {
+                act.emit("llm.status", status().toString());
             }
-            if (id != null) act.resolve(id, true, "{}");
-            act.emit("llm.status", status().toString());
         });
     }
 
     void generate(JSONObject a, String id) {
+        if (shutdownRequested) { fail(id, "Engine is shutting down"); return; }
         final long h;
         synchronized (genLock) { h = handle; }
-        if (h == 0 || !nativeOk) { fail(id, "No model loaded"); return; }
+        if (h == 0 || !nativeOk || loading) { fail(id, "No model loaded"); return; }
         if (genThread != null && genThread.isAlive()) {
-            // A previous generation is still winding down (or stuck): stop it and give
-            // it a brief grace period so a new utterance never dead-ends on "Already generating".
             synchronized (genLock) { if (handle != 0) nativeStop(handle); }
-            try { genThread.join(1500); } catch (InterruptedException ignored) {}
+            try { genThread.join(1500); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
             if (genThread != null && genThread.isAlive()) { fail(id, "Already generating"); return; }
         }
         String genId = a.optString("genId", "g0");
-        currentGenId = genId;
         JSONArray messages = a.optJSONArray("messages");
         JSONObject params = a.optJSONObject("params");
         JSONArray images = a.optJSONArray("images");
@@ -134,8 +204,6 @@ public final class LlmEngine {
         genThread = new Thread(() -> {
             boolean attached = false;
             try {
-                // On-demand projector: attach the ~480 MB mmproj only for this
-                // multimodal turn, then detach to return the RAM to text chat.
                 if (wantsVision) {
                     attached = nativeAttachMmproj(h, mmprojPath);
                     if (!attached) throw new IllegalStateException("Vision projector could not be attached");
@@ -162,6 +230,17 @@ public final class LlmEngine {
                 catch (Exception ignored) {}
             } finally {
                 if (attached) { try { nativeDetachMmproj(h); } catch (Throwable ignored) {} }
+                if (shutdownRequested) {
+                    synchronized (genLock) {
+                        if (handle == h) {
+                            try {
+                                nativeFree(h);
+                                handle = 0;
+                                modelPath = null; modelName = null; mmprojPath = null; omni = false;
+                            } catch (Throwable t) { Log.w(TAG, "deferred native cleanup", t); }
+                        }
+                    }
+                }
             }
         }, "vani-generate");
         genThread.start();
@@ -172,18 +251,27 @@ public final class LlmEngine {
         act.resolve(id, true, "{}");
     }
 
-    private void stopGenerationInternal() {
+    /** Returns false rather than freeing a handle still used by native code. */
+    private boolean stopGenerationInternal() {
         synchronized (genLock) { if (handle != 0) nativeStop(handle); }
         Thread t = genThread;
         if (t != null && t.isAlive()) {
-            try { t.join(8000); } catch (InterruptedException ignored) {}
+            try { t.join(8000); }
+            catch (InterruptedException ignored) { Thread.currentThread().interrupt(); return false; }
         }
+        if (t != null && t.isAlive()) return false;
         genThread = null;
+        return true;
     }
 
     void shutdown() {
-        stopGenerationInternal();
-        synchronized (genLock) { if (handle != 0) { nativeFree(handle); handle = 0; } }
+        shutdownRequested = true;
+        if (stopGenerationInternal()) {
+            synchronized (genLock) {
+                if (handle != 0) { nativeFree(handle); handle = 0; }
+                modelPath = null; modelName = null; mmprojPath = null; omni = false;
+            }
+        }
         exec.shutdownNow();
     }
 
