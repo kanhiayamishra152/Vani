@@ -79,7 +79,10 @@ export async function autoRestore() {
 
 /** Budget history so prompt + generation fits the context window. */
 export function buildContextMessages(history, systemText, reserve) {
-  const budget = Math.max(512, settings.nCtx - reserve - 256);
+  // Use the native context actually allocated (Omni may be capped below the
+  // global setting), not a larger preference that would overflow the prompt.
+  const nativeCtx = llm.info?.nCtx || settings.nCtx;
+  const budget = Math.max(512, nativeCtx - reserve - 256);
   const msgs = [];
   let used = estTokens(systemText);
   for (let i = history.length - 1; i >= 0; i--) {

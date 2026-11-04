@@ -47,6 +47,7 @@ public final class LlmEngine {
     private volatile boolean omni = false;
     private volatile String loadingPath = null;
     private volatile String loadingName = null;
+    private volatile boolean shutdownRequested = false;
 
     LlmEngine(MainActivity act) { this.act = act; }
 
@@ -88,7 +89,8 @@ public final class LlmEngine {
                 String k = it.next();
                 j.put(k, n.get(k));
             }
-        } catch (Exception e) {
+        } catch (Throwable e) {
+            Log.w(TAG, "status", e);
             try { j.put("state", "idle"); } catch (Exception ignored) {}
         }
         return j;
@@ -96,13 +98,17 @@ public final class LlmEngine {
 
     void load(JSONObject a, String id) {
         if (!nativeOk) { fail(id, "Native engine missing from this build"); return; }
+        if (shutdownRequested) { fail(id, "Engine is shutting down"); return; }
         final boolean requestedOmni = isOmniRequest(a);
         final String requestedPath = a.optString("path", "");
         final String requestedName = a.optString("name", new java.io.File(requestedPath).getName());
-        loading = true;
-        loadingOmni = requestedOmni;
-        loadingPath = requestedPath;
-        loadingName = requestedName;
+        synchronized (this) {
+            if (loading) { fail(id, "A model is already loading; wait for it to finish"); return; }
+            loading = true;
+            loadingOmni = requestedOmni;
+            loadingPath = requestedPath;
+            loadingName = requestedName;
+        }
         act.emit("llm.status", status().toString());
         exec.submit(() -> {
             try {
@@ -124,19 +130,26 @@ public final class LlmEngine {
                     nCtx = Math.min(nCtx, 2048);
                     nBatch = Math.min(nBatch, 128);
                 }
+                if (shutdownRequested) return;
                 long h = nativeLoad(path, mmproj == null ? "" : mmproj,
                         nCtx, nThreads, nBatch, a.optBoolean("flashAttn", true));
                 if (h == 0) throw new IllegalStateException("Failed to load model (unsupported, corrupt, or insufficient free RAM)");
                 synchronized (genLock) {
+                    if (shutdownRequested) {
+                        nativeFree(h);
+                        return;
+                    }
                     handle = h; modelPath = path; modelName = requestedName;
                     mmprojPath = mmproj; omni = requestedOmni;
                 }
                 Models.setLastActive(act, path);
                 loading = false; loadingOmni = false; loadingPath = null; loadingName = null;
                 act.resolve(id, true, status().toString());
-            } catch (Exception e) {
+            } catch (Throwable e) {
+                // JNI allocation failures are reported as request errors rather
+                // than escaping the executor and terminating the app process.
                 Log.e(TAG, "model load", e);
-                fail(id, e.getMessage());
+                fail(id, e.getMessage() == null ? "Model allocation failed" : e.getMessage());
             } finally {
                 loading = false;
                 loadingOmni = false;
@@ -149,22 +162,28 @@ public final class LlmEngine {
 
     void unload(String id) {
         exec.submit(() -> {
-            if (!stopGenerationInternal()) {
-                fail(id, "Generation is still stopping; model memory was not freed unsafely. Try Unload again.");
+            try {
+                if (!stopGenerationInternal()) {
+                    fail(id, "Generation is still stopping; model memory was not freed unsafely. Try Unload again.");
+                    return;
+                }
+                synchronized (genLock) {
+                    if (handle != 0) { nativeFree(handle); handle = 0; }
+                    modelPath = null; modelName = null; mmprojPath = null; omni = false;
+                }
+                Models.setLastActive(act, "");
+                if (id != null) act.resolve(id, true, status().toString());
+            } catch (Throwable t) {
+                Log.e(TAG, "model unload", t);
+                fail(id, t.getMessage() == null ? "Model cleanup failed safely" : t.getMessage());
+            } finally {
                 act.emit("llm.status", status().toString());
-                return;
             }
-            synchronized (genLock) {
-                if (handle != 0) { nativeFree(handle); handle = 0; }
-                modelPath = null; modelName = null; mmprojPath = null; omni = false;
-            }
-            Models.setLastActive(act, "");
-            if (id != null) act.resolve(id, true, status().toString());
-            act.emit("llm.status", status().toString());
         });
     }
 
     void generate(JSONObject a, String id) {
+        if (shutdownRequested) { fail(id, "Engine is shutting down"); return; }
         final long h;
         synchronized (genLock) { h = handle; }
         if (h == 0 || !nativeOk || loading) { fail(id, "No model loaded"); return; }
@@ -211,6 +230,17 @@ public final class LlmEngine {
                 catch (Exception ignored) {}
             } finally {
                 if (attached) { try { nativeDetachMmproj(h); } catch (Throwable ignored) {} }
+                if (shutdownRequested) {
+                    synchronized (genLock) {
+                        if (handle == h) {
+                            try {
+                                nativeFree(h);
+                                handle = 0;
+                                modelPath = null; modelName = null; mmprojPath = null; omni = false;
+                            } catch (Throwable t) { Log.w(TAG, "deferred native cleanup", t); }
+                        }
+                    }
+                }
             }
         }, "vani-generate");
         genThread.start();
@@ -235,6 +265,7 @@ public final class LlmEngine {
     }
 
     void shutdown() {
+        shutdownRequested = true;
         if (stopGenerationInternal()) {
             synchronized (genLock) {
                 if (handle != 0) { nativeFree(handle); handle = 0; }

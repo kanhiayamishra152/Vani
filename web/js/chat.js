@@ -34,7 +34,7 @@ function updateThinkToggle() {
   btn.setAttribute('aria-label', on ? 'Thinking on — tap to turn off' : 'Thinking off — tap to turn on');
   btn.title = on ? 'Thinking: ON' : 'Thinking: OFF';
   const lbl = btn.querySelector('.think-label');
-  if (lbl) lbl.textContent = on ? 'Think' : 'Think';
+  if (lbl) lbl.textContent = 'Thinking';
 }
 
 function toggleThinking() {
@@ -170,11 +170,15 @@ function updateAutoTtsToggle() {
   const btn = $('#btn-auto-tts');
   if (!btn) return;
   const enabled = !!store.settings.autoTts;
-  btn.innerHTML = icon(enabled ? 'volume' : 'volumeOff');
+  const visual = enabled ? 'on' : 'off';
+  if (btn.dataset.audioState !== visual) {
+    btn.dataset.audioState = visual;
+    btn.innerHTML = `${icon(enabled ? 'volume' : 'volumeOff')}<span class="composer-action-label">Audio Creation</span>`;
+  }
   btn.classList.toggle('on', enabled);
   btn.setAttribute('aria-pressed', String(enabled));
-  btn.setAttribute('aria-label', enabled ? 'Auto-speak replies: on' : 'Auto-speak replies: off');
-  btn.title = enabled ? 'Auto-speak replies: ON' : 'Auto-speak replies: OFF';
+  btn.setAttribute('aria-label', enabled ? 'Audio Creation: on' : 'Audio Creation: off');
+  btn.title = enabled ? 'Audio Creation: ON' : 'Audio Creation: OFF';
 }
 function speakNextAuto(id) {
   if (autoSpeech.messageId !== id || autoSpeech.speaking) return;
@@ -205,6 +209,11 @@ function speakNextAuto(id) {
   });
   updateAudioButtons();
 }
+function queueAutoSpeech(text) {
+  if (!text) return;
+  if (autoSpeech.queue.length >= 6) autoSpeech.queue[autoSpeech.queue.length - 1] += ' ' + text;
+  else autoSpeech.queue.push(text);
+}
 function feedAutoSpeech(content, flush = false) {
   if (!store.settings.autoTts || !streamingMsgId) return;
   const id = streamingMsgId;
@@ -221,14 +230,14 @@ function feedAutoSpeech(content, flush = false) {
     // Queue each completed clause independently; do not coalesce a whole
     // multi-sentence token burst into one delayed synthesis request.
     const part = speechText(rest.slice(clauseStart, cut));
-    if (part) autoSpeech.queue.push(part);
+    queueAutoSpeech(part);
     clauseStart = cut;
   }
   if (cut > 0) autoSpeech.consumed += cut;
   if (flush) {
     const tail = speechText(text.slice(autoSpeech.consumed));
     autoSpeech.consumed = text.length;
-    if (tail) autoSpeech.queue.push(tail);
+    queueAutoSpeech(tail);
   }
   speakNextAuto(id);
 }
@@ -376,11 +385,26 @@ function setComposerStatus(text, kind = '') {
   node.textContent = text || '';
 }
 
+function syncComposerLayout(expanded) {
+  const bar = $('.composer-bar');
+  const top = $('#composer-top-actions');
+  const bottom = $('#composer-action-primary');
+  if (!bar || !top || !bottom || bar.classList.contains('expanded') === expanded) return;
+  bar.classList.toggle('expanded', expanded);
+  const live = $('#btn-live'), stop = $('#btn-stop'), send = $('#btn-send');
+  // Move the same controls (and their listeners), never duplicate them. While
+  // focused/typing/generating the input owns the full top row and actions sit below.
+  if (expanded) bottom.append(live, stop, send);
+  else top.append(live, stop, send);
+}
+
 function updateComposerState() {
-  const hasText = !!$('#composer-input').value.trim() || attachments.length > 0;
+  const input = $('#composer-input');
+  const hasText = !!input.value.trim() || attachments.length > 0;
   $('#btn-send').hidden = !hasText || !!activeGen;
   $('#btn-stop').hidden = !activeGen;
   $('#btn-live').hidden = hasText || !!activeGen;
+  syncComposerLayout(hasText || !!activeGen || dictating || document.activeElement === input);
   updateAutoTtsToggle();
 }
 
@@ -607,6 +631,8 @@ export function initChat() {
   }));
 
   const input = $('#composer-input');
+  input.addEventListener('focus', updateComposerState);
+  input.addEventListener('blur', () => requestAnimationFrame(updateComposerState));
   input.addEventListener('input', () => {
     input.style.height = 'auto';
     input.style.height = Math.min(input.scrollHeight, 132) + 'px';

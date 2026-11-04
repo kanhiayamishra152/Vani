@@ -90,7 +90,7 @@ export async function startListening(mode, cbs = {}) {
   listenCbs = cbs;
   wireAsrEvents();
   await refreshInstalled();
-  if (requestSeq !== listenSeq) return;
+  if (requestSeq !== listenSeq) return false;
   const { engine, entry } = resolveAsr();
   if (engine !== 'system' && !entry) throw new Error(`Install a matching ${engine} model in Model Hub → Supplementary`);
   try {
@@ -100,15 +100,16 @@ export async function startListening(mode, cbs = {}) {
     if (/permission denied/i.test(e.message || '')) throw e;
     // Compatibility with older native bridges without mic.ensurePermission.
   }
-  if (requestSeq !== listenSeq) return;
+  if (requestSeq !== listenSeq) return false;
   await invoke('asr.start', {
     engine, mode, dir: entry?.path || null, modelId: entry?.modelId || '', name: entry?.name || '',
     language: settings.asrLanguage || 'en', sensitivity: settings.vadSensitivity,
     once: !!cbs.once,
   });
   // Stop may have been pressed while permission/model loading was pending.
-  if (requestSeq !== listenSeq) { invoke('asr.stop').catch(() => {}); return; }
+  if (requestSeq !== listenSeq) { invoke('asr.stop').catch(() => {}); return false; }
   listening = true;
+  return true;
 }
 
 export async function stopListening() {
@@ -222,19 +223,23 @@ function wireTts() {
       if (!currentUtter || (p.utterId && p.utterId !== currentUtter.id)) return;
       const u = currentUtter; currentUtter = null;
       const error = new Error(p.error || 'Speech playback failed');
-      u.onError?.(error);
+      if (u.onError) u.onError(error);
+      else u.onEnd?.(false);
       emitLocal('voice.ttsError', { error: error.message });
     }),
   );
 }
 
 let utterSeq = 0;
+let previewSeq = 0;
 /** Speak a preview with the selected speaker. Each request owns a cancellable track. */
 export async function previewVoice(text, sid = settings.ttsSid) {
   if (!hasNative()) { phonon.speak(text, { rate: settings.ttsSpeed }); return; }
   wireTts();
   stopSpeech();
+  const request = ++previewSeq;
   await configureVoice();
+  if (request !== previewSeq) return;
   const id = 'pv' + (++utterSeq);
   currentUtter = { id, onLevel: null, onEnd: null, onError: null };
   try { await invoke('tts.speak', { utterId: id, text, sid }); }
@@ -275,6 +280,7 @@ export function speak(text, { onStart, onLevel, onEnd, onError } = {}) {
 }
 
 export function stopSpeech() {
+  ++previewSeq; // invalidate a Preview Voice still waiting for model configuration
   phonon.stop();
   if (currentUtter) {
     const u = currentUtter; currentUtter = null;

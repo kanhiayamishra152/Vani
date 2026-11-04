@@ -1,11 +1,13 @@
 package ai.vani.app;
 
 import android.content.Context;
+import android.util.AtomicFile;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.File;
+import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.Locale;
@@ -35,9 +37,19 @@ public final class Models {
         return out;
     }
 
-    private static synchronized void save(Context ctx, JSONArray arr) {
-        try { Files.write(registry(ctx).toPath(), arr.toString().getBytes(StandardCharsets.UTF_8)); }
-        catch (Exception ignored) {}
+    private static synchronized boolean save(Context ctx, JSONArray arr) {
+        AtomicFile atomic = new AtomicFile(registry(ctx));
+        FileOutputStream out = null;
+        try {
+            out = atomic.startWrite();
+            out.write(arr.toString().getBytes(StandardCharsets.UTF_8));
+            atomic.finishWrite(out);
+            out = null;
+            return true;
+        } catch (Exception ignored) {
+            if (out != null) atomic.failWrite(out);
+            return false;
+        }
     }
 
     public static synchronized void register(Context ctx, JSONObject entry) throws Exception {
@@ -49,13 +61,20 @@ public final class Models {
             boolean same = e.optString("modelId").equals(entry.optString("modelId"))
                     && e.optString("kind").equals(entry.optString("kind"))
                     && e.optString("quant").equals(entry.optString("quant"));
-            if (same) { deleteTree(new File(e.getString("path"))); continue; }
+            if (same) {
+                // Reconciliation can register the same directory again. Never
+                // recursively delete the destination that is being registered.
+                if (!samePath(e.getString("path"), entry.getString("path"))) {
+                    deleteTree(new File(e.getString("path")));
+                }
+                continue;
+            }
             next.put(e);
         }
         entry.put("id", UUID.randomUUID().toString());
         entry.put("installedAt", System.currentTimeMillis());
         next.put(entry);
-        save(ctx, next);
+        if (!save(ctx, next)) throw new Exception("Could not persist the installed-model registry");
     }
 
     public static synchronized void delete(Context ctx, String id) {
@@ -68,6 +87,11 @@ public final class Models {
             next.put(e);
         }
         save(ctx, next);
+    }
+
+    private static boolean samePath(String a, String b) {
+        try { return new File(a).getCanonicalFile().equals(new File(b).getCanonicalFile()); }
+        catch (Exception ignored) { return new File(a).getAbsolutePath().equals(new File(b).getAbsolutePath()); }
     }
 
     static void deleteTree(File f) {

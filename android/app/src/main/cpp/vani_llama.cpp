@@ -10,6 +10,7 @@
 #include <cstring>
 #include <mutex>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -30,7 +31,7 @@ namespace {
 struct VaniCtx {
     llama_model * model = nullptr;
     llama_context * ctx = nullptr;
-    mtmd_context * mctx = nullptr;
+    std::atomic<mtmd_context *> mctx{nullptr};
     common_chat_templates_ptr tmpls;
     const llama_vocab * vocab = nullptr;
     std::vector<llama_token> prev_tokens;   // prefix KV cache
@@ -43,6 +44,14 @@ struct VaniCtx {
 
 void llama_log_to_android(ggml_log_level level, const char * text, void *) {
     if (level >= GGML_LOG_LEVEL_WARN) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, "%s", text);
+}
+
+void throw_runtime(JNIEnv * env, const char * message) {
+    if (!env || env->ExceptionCheck()) return;
+    jclass cls = env->FindClass("java/lang/RuntimeException");
+    if (!cls) return;
+    env->ThrowNew(cls, message ? message : "Native model operation failed");
+    env->DeleteLocalRef(cls);
 }
 
 std::string jstr(JNIEnv * env, jstring s) {
@@ -204,48 +213,69 @@ JNIEXPORT void JNICALL Java_ai_vani_app_LlmEngine_nativeInit(JNIEnv *, jclass) {
 JNIEXPORT jlong JNICALL Java_ai_vani_app_LlmEngine_nativeLoad(
         JNIEnv * env, jclass, jstring jpath, jstring jmmproj,
         jint nCtx, jint nThreads, jint nBatch, jboolean flashAttn) {
-    std::string path = jstr(env, jpath);
-    std::string mmproj = jstr(env, jmmproj);
+    llama_model * model = nullptr;
+    llama_context * ctx = nullptr;
+    VaniCtx * v = nullptr;
+    try {
+        std::string path = jstr(env, jpath);
+        std::string mmproj = jstr(env, jmmproj);
+        if (path.empty()) throw std::runtime_error("Model path is empty");
 
-    llama_model_params mparams = llama_model_default_params();
-    mparams.n_gpu_layers = 0;
-    mparams.load_mode = LLAMA_LOAD_MODE_MMAP;
+        llama_model_params mparams = llama_model_default_params();
+        mparams.n_gpu_layers = 0;
+        mparams.load_mode = LLAMA_LOAD_MODE_MMAP;
 
-    llama_model * model = llama_model_load_from_file(path.c_str(), mparams);
-    if (!model) { LOGE("model load failed: %s", path.c_str()); return 0; }
+        model = llama_model_load_from_file(path.c_str(), mparams);
+        if (!model) {
+            LOGE("model load failed: %s", path.c_str());
+            return 0;
+        }
 
-    llama_context_params cparams = llama_context_default_params();
-    cparams.n_ctx = (uint32_t) nCtx;
-    // v1.3.0 PocketPal-class throughput: 512 logical batch / 256 physical ubatch,
-    // Q8_0 KV cache (halves KV memory bandwidth on big.LITTLE), flash attention.
-    cparams.n_batch = (uint32_t) nBatch;
-    cparams.n_ubatch = (uint32_t) std::min<int>(nBatch, 256);
-    cparams.n_threads = nThreads;
-    cparams.n_threads_batch = nThreads;
-    cparams.flash_attn_type = flashAttn ? LLAMA_FLASH_ATTN_TYPE_ENABLED : LLAMA_FLASH_ATTN_TYPE_AUTO;
-    cparams.type_k = GGML_TYPE_Q8_0;
-    cparams.type_v = flashAttn ? GGML_TYPE_Q8_0 : GGML_TYPE_F16;
-    cparams.embeddings = false;
-    cparams.no_perf = true;
+        llama_context_params cparams = llama_context_default_params();
+        cparams.n_ctx = (uint32_t) nCtx;
+        cparams.n_batch = (uint32_t) nBatch;
+        cparams.n_ubatch = (uint32_t) std::min<int>(nBatch, 256);
+        cparams.n_threads = nThreads;
+        cparams.n_threads_batch = nThreads;
+        cparams.flash_attn_type = flashAttn ? LLAMA_FLASH_ATTN_TYPE_ENABLED : LLAMA_FLASH_ATTN_TYPE_AUTO;
+        cparams.type_k = GGML_TYPE_Q8_0;
+        cparams.type_v = flashAttn ? GGML_TYPE_Q8_0 : GGML_TYPE_F16;
+        cparams.embeddings = false;
+        cparams.no_perf = true;
 
-    llama_context * ctx = llama_init_from_model(model, cparams);
-    if (!ctx) { LOGE("context init failed"); llama_model_free(model); return 0; }
+        ctx = llama_init_from_model(model, cparams);
+        if (!ctx) throw std::runtime_error("Context initialization failed; insufficient native memory or unsupported model settings");
 
-    auto * v = new VaniCtx();
-    v->model = model;
-    v->ctx = ctx;
-    v->vocab = llama_model_get_vocab(model);
-    v->n_threads = nThreads;
-    v->n_batch = nBatch;
-    v->tmpls = common_chat_templates_init(model, "");
+        v = new VaniCtx();
+        v->model = model;
+        v->ctx = ctx;
+        v->vocab = llama_model_get_vocab(model);
+        v->n_threads = nThreads;
+        v->n_batch = nBatch;
+        v->tmpls = common_chat_templates_init(model, "");
+        if (!v->tmpls) throw std::runtime_error("Chat template initialization failed");
+        if (!mmproj.empty()) v->mmproj_path = mmproj;
 
-    // v1.3.0 ON-DEMAND PROJECTOR: the ~480 MB vision/audio mmproj is NOT loaded
-    // into RAM at model load. It is attached only for an image/voice turn and
-    // detached right after, so pure-text chats keep that memory free.
-    if (!mmproj.empty()) v->mmproj_path = mmproj;
-    LOGI("model ready: ctx=%d threads=%d batch=%d mmproj=%s", nCtx, nThreads, nBatch,
-         v->mmproj_path.empty() ? "none" : "on-demand");
-    return reinterpret_cast<jlong>(v);
+        LOGI("model ready: ctx=%d threads=%d batch=%d mmproj=%s", nCtx, nThreads, nBatch,
+             v->mmproj_path.empty() ? "none" : "on-demand");
+        return reinterpret_cast<jlong>(v);
+    } catch (const std::exception & e) {
+        LOGE("nativeLoad exception: %s", e.what());
+        if (v) v->tmpls.reset();
+        delete v;
+        if (ctx) llama_free(ctx);
+        if (model) llama_model_free(model);
+        throw_runtime(env, e.what());
+        return 0;
+    } catch (...) {
+        LOGE("nativeLoad unknown exception");
+        if (v) v->tmpls.reset();
+        delete v;
+        if (ctx) llama_free(ctx);
+        if (model) llama_model_free(model);
+        throw_runtime(env, "Native model allocation failed");
+        return 0;
+    }
 }
 
 JNIEXPORT jstring JNICALL Java_ai_vani_app_LlmEngine_nativeStatus(JNIEnv * env, jclass, jlong handle) {
@@ -255,10 +285,12 @@ JNIEXPORT jstring JNICALL Java_ai_vani_app_LlmEngine_nativeStatus(JNIEnv * env, 
         j["nCtx"] = (int) llama_n_ctx(v->ctx);
         j["nCtxTrain"] = llama_model_n_ctx_train(v->model);
         j["nThreads"] = v->n_threads;
-        // Capability (projector available on demand) vs. currently resident.
-        j["vision"] = !v->mmproj_path.empty() || (v->mctx && mtmd_support_vision(v->mctx));
-        j["audio"] = !v->mmproj_path.empty() || (v->mctx && mtmd_support_audio(v->mctx));
-        j["mmprojLoaded"] = v->mctx != nullptr;
+        // Do not call into mtmd while another thread may be attaching or
+        // destroying it. The path describes capability; the atomic pointer
+        // describes residency without a use-after-free race.
+        j["vision"] = !v->mmproj_path.empty();
+        j["audio"] = !v->mmproj_path.empty();
+        j["mmprojLoaded"] = v->mctx.load() != nullptr;
     }
     return env->NewStringUTF(j.dump().c_str());
 }
@@ -336,7 +368,10 @@ JNIEXPORT void JNICALL Java_ai_vani_app_LlmEngine_nativeGenerate(
         size_t evaluatedPromptTokens = 0;
         size_t promptTokenCount = 0;
         bool decodeFailed = false;
-        bool hasImages = images.size() > 0 && v->mctx;
+        mtmd_context * mctx = v->mctx.load();
+        if (images.size() > 0 && mctx == nullptr)
+            throw std::runtime_error("The vision/audio projector is not attached; image input was not discarded");
+        bool hasImages = images.size() > 0;
         std::vector<llama_token> prompt_tokens;
 
         if (hasImages) {
@@ -348,32 +383,34 @@ JNIEXPORT void JNICALL Java_ai_vani_app_LlmEngine_nativeGenerate(
             replace_all(prompt, "<image>", marker);
 
             std::vector<mtmd_bitmap *> bitmaps;
+            struct BitmapCleanup {
+                std::vector<mtmd_bitmap *> & items;
+                ~BitmapCleanup() { for (auto * b : items) mtmd_bitmap_free(b); }
+            } bitmapCleanup{bitmaps};
+            bitmaps.reserve(images.size());
             for (size_t i = 0; i < images.size(); i++) {
                 std::string b64 = images.at(i).get<std::string>();
                 size_t comma = b64.find(',');
                 if (comma != std::string::npos) b64 = b64.substr(comma + 1);
                 auto bytes = base64_decode(b64);
+                if (bytes.empty()) throw std::runtime_error("Image input is empty or invalid");
                 mtmd_helper_bitmap_wrapper w = mtmd_helper_bitmap_init_from_buf(
-                        v->mctx, bytes.data(), bytes.size(), false, mtmd_helper_init_opt_default());
-                if (w.bitmap) bitmaps.push_back(w.bitmap);
+                        mctx, bytes.data(), bytes.size(), false, mtmd_helper_init_opt_default());
+                if (!w.bitmap) throw std::runtime_error("Image decoding failed in the native projector");
+                bitmaps.push_back(w.bitmap);
             }
-            mtmd_input_chunks * chunks = mtmd_input_chunks_init();
+            std::unique_ptr<mtmd_input_chunks, decltype(&mtmd_input_chunks_free)> chunks(
+                    mtmd_input_chunks_init(), &mtmd_input_chunks_free);
+            if (!chunks) throw std::runtime_error("Could not allocate multimodal input chunks");
             mtmd_input_text text{prompt.c_str(), prompt.size(), false, true};
-            int32_t rc = mtmd_tokenize(v->mctx, chunks, &text,
+            int32_t rc = mtmd_tokenize(mctx, chunks.get(), &text,
                                        bitmaps.empty() ? nullptr : bitmaps.data(), bitmaps.size());
-            if (rc != 0) {
-                for (auto * b : bitmaps) mtmd_bitmap_free(b);
-                mtmd_input_chunks_free(chunks);
-                cb.error("Failed to tokenize image input");
-                return;
-            }
+            if (rc != 0) throw std::runtime_error("Failed to tokenize image input");
             llama_memory_clear(mem, true);
             llama_pos new_past = 0;
-            rc = mtmd_helper_eval_chunks(v->mctx, v->ctx, chunks, 0, 0, v->n_batch, true, &new_past);
+            rc = mtmd_helper_eval_chunks(mctx, v->ctx, chunks.get(), 0, 0, v->n_batch, true, &new_past);
             n_past = new_past;
-            for (auto * b : bitmaps) mtmd_bitmap_free(b);
-            mtmd_input_chunks_free(chunks);
-            if (rc != 0) { cb.error("Image evaluation failed"); return; }
+            if (rc != 0) throw std::runtime_error("Image evaluation failed");
             v->prev_tokens.clear();
         } else {
             // ---- text path with prefix KV-cache reuse ----
@@ -530,39 +567,77 @@ JNIEXPORT void JNICALL Java_ai_vani_app_LlmEngine_nativeStop(JNIEnv *, jclass, j
 JNIEXPORT jboolean JNICALL Java_ai_vani_app_LlmEngine_nativeAttachMmproj(JNIEnv * env, jclass, jlong handle, jstring jpath) {
     auto * v = reinterpret_cast<VaniCtx *>(handle);
     if (!v || !v->model) return JNI_FALSE;
-    std::lock_guard<std::mutex> lock(v->mtx);
-    if (v->mctx) return JNI_TRUE; // already resident
-    std::string path = jstr(env, jpath);
-    if (path.empty()) path = v->mmproj_path;
-    if (path.empty()) return JNI_FALSE;
-    mtmd_context_params mp = mtmd_context_params_default();
-    mp.use_gpu = false;
-    mp.n_threads = v->n_threads;
-    mp.print_timings = false;
-    mp.warmup = false;
-    mp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_AUTO;
-    v->mctx = mtmd_init_from_file(path.c_str(), v->model, mp);
-    if (!v->mctx) { LOGE("mmproj attach failed: %s", path.c_str()); return JNI_FALSE; }
-    LOGI("mmproj attached (vision=%d audio=%d)", mtmd_support_vision(v->mctx), mtmd_support_audio(v->mctx));
-    return JNI_TRUE;
+    try {
+        std::lock_guard<std::mutex> lock(v->mtx);
+        if (v->mctx.load() != nullptr) return JNI_TRUE;
+        std::string path = jstr(env, jpath);
+        if (path.empty()) path = v->mmproj_path;
+        if (path.empty()) return JNI_FALSE;
+        mtmd_context_params mp = mtmd_context_params_default();
+        mp.use_gpu = false;
+        mp.n_threads = v->n_threads;
+        mp.print_timings = false;
+        mp.warmup = false;
+        mp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_AUTO;
+        mtmd_context * created = mtmd_init_from_file(path.c_str(), v->model, mp);
+        if (!created) {
+            LOGE("mmproj attach failed: %s", path.c_str());
+            return JNI_FALSE;
+        }
+        v->mmproj_path = path;
+        v->mctx.store(created);
+        LOGI("mmproj attached (vision=%d audio=%d)", mtmd_support_vision(created), mtmd_support_audio(created));
+        return JNI_TRUE;
+    } catch (const std::exception & e) {
+        LOGE("mmproj attach exception: %s", e.what());
+        throw_runtime(env, e.what());
+        return JNI_FALSE;
+    } catch (...) {
+        LOGE("mmproj attach unknown exception");
+        throw_runtime(env, "Native projector allocation failed");
+        return JNI_FALSE;
+    }
 }
 
 // Detach + free the projector after a multimodal turn (returns ~480 MB RAM).
 JNIEXPORT void JNICALL Java_ai_vani_app_LlmEngine_nativeDetachMmproj(JNIEnv *, jclass, jlong handle) {
     auto * v = reinterpret_cast<VaniCtx *>(handle);
     if (!v) return;
-    std::lock_guard<std::mutex> lock(v->mtx);
-    if (v->mctx) { mtmd_free(v->mctx); v->mctx = nullptr; LOGI("mmproj detached (RAM freed)"); }
+    try {
+        std::lock_guard<std::mutex> lock(v->mtx);
+        mtmd_context * old = v->mctx.exchange(nullptr);
+        if (old) {
+            mtmd_free(old);
+            LOGI("mmproj detached (RAM freed)");
+        }
+    } catch (...) {
+        LOGE("mmproj detach failed");
+    }
 }
 
 JNIEXPORT void JNICALL Java_ai_vani_app_LlmEngine_nativeFree(JNIEnv *, jclass, jlong handle) {
     auto * v = reinterpret_cast<VaniCtx *>(handle);
     if (!v) return;
-    std::lock_guard<std::mutex> lock(v->mtx);
-    if (v->mctx) mtmd_free(v->mctx);
-    if (v->ctx) llama_free(v->ctx);
-    if (v->model) llama_model_free(v->model);
-    delete v;
+    try {
+        {
+            std::lock_guard<std::mutex> lock(v->mtx);
+            mtmd_context * old = v->mctx.exchange(nullptr);
+            if (old) mtmd_free(old);
+            v->tmpls.reset();
+            if (v->ctx) {
+                llama_free(v->ctx);
+                v->ctx = nullptr;
+            }
+            if (v->model) {
+                llama_model_free(v->model);
+                v->model = nullptr;
+            }
+        }
+        // The lock must be released before its containing object is deleted.
+        delete v;
+    } catch (...) {
+        LOGE("nativeFree failed");
+    }
 }
 
 } // extern "C"

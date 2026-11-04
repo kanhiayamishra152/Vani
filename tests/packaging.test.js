@@ -31,3 +31,10 @@ test('CI blocks publication unless final APK parsing and certificate identity pa
   assert.match(workflow, /APK_CERT.*KEY_CERT|APK_CERT" != "\$KEY_CERT/);
   assert.match(workflow, /original OC-Lily\.vrm missing from final APK/);
 });
+
+test('push CI builds artifacts without mutating immutable published releases', () => {
+  assert.doesNotMatch(workflow, /if: github\.event_name == 'push' \|\|/);
+  assert.doesNotMatch(workflow, /gh release edit/);
+  assert.match(workflow, /preserving its assets and notes\. Bump RELEASE_TAG/);
+  assert.match(workflow, /if: github\.event_name == 'workflow_dispatch' && inputs\.publish_release/);
+});

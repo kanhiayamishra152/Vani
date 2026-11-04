@@ -52,10 +52,11 @@ public class MainActivity extends Activity {
     SpeechEngine speech;
     CrashGuard crashGuard;
     final Handler main = new Handler(Looper.getMainLooper());
-    final ExecutorService io = Executors.newCachedThreadPool();
+    final ExecutorService io = Executors.newSingleThreadExecutor();
     /** Serializes cross-engine admission decisions; native work stays off the UI thread. */
     private final Object modelLifecycleLock = new Object();
 
+    private volatile boolean destroyed = false;
     private volatile boolean jsHandlesBack = false;
     volatile String pageOrigin = ASSET_ORIGIN;
     private PermissionRequest pendingPerm;
@@ -69,6 +70,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        destroyed = false;
         instance = this;
         llm = new LlmEngine(this);
         speech = new SpeechEngine(this, (event, payload) -> { emit(event, payload); return kotlin.Unit.INSTANCE; });
@@ -225,6 +227,15 @@ public class MainActivity extends Activity {
     /** v1.3.0 unified mic permission: check RECORD_AUDIO, request if needed,
      *  resolve {granted} so JS can start the native AudioRecord bridge. */
     void ensureMicPermission(String id) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            main.post(() -> ensureMicPermission(id));
+            return;
+        }
+        if (destroyed) return;
+        if (pendingMicCb != null) {
+            rejectModelRequest(id, "Another microphone permission request is already active");
+            return;
+        }
         if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
             try { resolve(id, true, new JSONObject().put("granted", true).toString()); }
             catch (Exception e) { resolve(id, true, "{\"granted\":true}"); }
@@ -235,6 +246,11 @@ public class MainActivity extends Activity {
     }
 
     void requestNotifPermission() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            main.post(this::requestNotifPermission);
+            return;
+        }
+        if (destroyed) return;
         if (Build.VERSION.SDK_INT >= 33
                 && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, REQ_NOTIF);
@@ -242,11 +258,17 @@ public class MainActivity extends Activity {
     }
 
     void launchImport() {
-        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-        i.addCategory(Intent.CATEGORY_OPENABLE);
-        i.setType("*/*");
-        i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
-        startActivityForResult(i, REQ_IMPORT);
+        if (destroyed) return;
+        try {
+            Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            i.addCategory(Intent.CATEGORY_OPENABLE);
+            i.setType("*/*");
+            i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+            startActivityForResult(i, REQ_IMPORT);
+        } catch (Exception e) {
+            Log.e(TAG, "import picker", e);
+            emitLocalToast("No document picker is available on this device");
+        }
     }
 
     @Override
@@ -259,8 +281,9 @@ public class MainActivity extends Activity {
             } else if (data.getData() != null) {
                 uris.add(data.getData());
             }
-            if (uris.isEmpty()) return;
-            io.submit(() -> importFiles(uris));
+            if (uris.isEmpty() || destroyed) return;
+            try { io.submit(() -> importFiles(uris)); }
+            catch (java.util.concurrent.RejectedExecutionException e) { emitLocalToast("Import is unavailable while the app is closing"); }
         }
     }
 
@@ -276,7 +299,9 @@ public class MainActivity extends Activity {
     }
 
     private void copyUri(Uri uri, File out) throws Exception {
-        try (InputStream in = getContentResolver().openInputStream(uri);
+        InputStream source = getContentResolver().openInputStream(uri);
+        if (source == null) throw new java.io.IOException("The selected document could not be opened");
+        try (InputStream in = source;
              FileOutputStream fos = new FileOutputStream(out)) {
             byte[] buf = new byte[65536];
             int n;
@@ -291,9 +316,12 @@ public class MainActivity extends Activity {
             for (Uri u : uris) names.add(displayName(u));
 
             if (uris.size() == 1 && names.get(0).toLowerCase().endsWith(".gguf")) {
-                String name = names.get(0);
-                File out = new File(Models.modelsDir(this), name);
-                copyUri(uris.get(0), out);
+                String name = SafeFilename.clean(names.get(0));
+                File out = SafeFilename.safeChild(Models.modelsDir(this), name);
+                File part = SafeFilename.safeChild(Models.modelsDir(this), name + ".part");
+                copyUri(uris.get(0), part);
+                if (out.exists() && !out.delete()) throw new java.io.IOException("Could not replace the existing imported model");
+                if (!part.renameTo(out)) throw new java.io.IOException("Could not finalize the imported model");
                 JSONObject e = new JSONObject();
                 e.put("modelId", "custom");
                 e.put("name", name.replaceFirst("(?i)\\.gguf$", ""));
@@ -339,17 +367,23 @@ public class MainActivity extends Activity {
 
     /** Native -> JS event. payloadJson must be a valid JSON value. */
     public void emit(String event, String payloadJson) {
+        if (destroyed) return;
         final String js = "window.VaniBridge&&window.VaniBridge._emit(" + JSONObject.quote(event) + "," + payloadJson + ")";
         main.post(() -> {
-            try { if (web != null) web.evaluateJavascript(js, null); } catch (Exception ignored) {}
+            WebView target = web;
+            if (destroyed || target == null) return;
+            try { target.evaluateJavascript(js, null); } catch (Exception ignored) {}
         });
     }
 
     /** Native -> JS promise resolution. */
     public void resolve(String id, boolean ok, String payloadJson) {
+        if (destroyed) return;
         final String js = "window.VaniBridge&&window.VaniBridge._resolve(" + JSONObject.quote(id) + "," + ok + "," + payloadJson + ")";
         main.post(() -> {
-            try { if (web != null) web.evaluateJavascript(js, null); } catch (Exception ignored) {}
+            WebView target = web;
+            if (destroyed || target == null) return;
+            try { target.evaluateJavascript(js, null); } catch (Exception ignored) {}
         });
     }
 
@@ -381,16 +415,40 @@ public class MainActivity extends Activity {
         super.onTrimMemory(level);
         String severity = level >= TRIM_MEMORY_COMPLETE ? "critical" :
                 (level >= TRIM_MEMORY_RUNNING_CRITICAL ? "high" : "moderate");
+        // Release transient UI/audio buffers, never kill a loaded model mid-task.
+        try { if (speech != null) speech.trimMemory(); } catch (Exception ignored) {}
         emit("memory.pressure", "{\"level\":\"" + severity + "\"}");
     }
 
     @Override
+    public void onLowMemory() {
+        super.onLowMemory();
+        try { if (speech != null) speech.trimMemory(); } catch (Exception ignored) {}
+        emit("memory.pressure", "{\"level\":\"critical\"}");
+    }
+
+    @Override
     protected void onDestroy() {
-        instance = null;
+        destroyed = true;
+        if (instance == this) instance = null;
         try { if (crashGuard != null) crashGuard.stop(); } catch (Exception ignored) {}
         try { if (speech != null) speech.release(); } catch (Exception ignored) {}
-        try { if (llm != null) llm.shutdown(); } catch (Exception ignored) {}
-        try { if (web != null) web.destroy(); } catch (Exception ignored) {}
+        io.shutdownNow();
+        // Native generation can take time to stop. Never block the Android UI
+        // thread for up to eight seconds while the Activity is being destroyed.
+        final LlmEngine engine = llm;
+        if (engine != null) {
+            Thread cleanup = new Thread(engine::shutdown, "vani-llm-shutdown");
+            cleanup.setDaemon(true);
+            cleanup.start();
+        }
+        try {
+            if (web != null) {
+                web.removeJavascriptInterface("VaniNative");
+                web.destroy();
+            }
+        } catch (Exception ignored) {}
+        web = null;
         super.onDestroy();
     }
 }

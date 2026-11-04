@@ -19,6 +19,7 @@ const POSE_BONES = ['hips', 'spine', 'chest', 'neck', 'head',
   'leftUpperArm', 'leftLowerArm', 'leftHand', 'rightUpperArm', 'rightLowerArm', 'rightHand',
   'leftUpperLeg', 'leftLowerLeg', 'leftFoot', 'rightUpperLeg', 'rightLowerLeg', 'rightFoot'];
 const VISEMES = ['aa', 'ih', 'ou', 'ee', 'oh'];
+const EMPTY_EXPR = Object.freeze({});
 const _v1 = new THREE.Vector3(), _v2 = new THREE.Vector3(), _v3 = new THREE.Vector3();
 const _q1 = new THREE.Quaternion(), _q2 = new THREE.Quaternion();
 
@@ -28,6 +29,8 @@ export class AvatarStage {
     this.opts = opts;                 // { batterySaver, fpsTarget, onArrive, onReady, onError, onProgress }
     this.vrm = null;
     this.raf = null;
+    this.frameTimer = null;
+    this._targets = Object.fromEntries(POSE_BONES.map(name => [name, { x: 0, y: 0, z: 0 }]));
     this.last = 0;
     this.time = 0;
     this.state = 'loading';           // loading | walkin | idle | action
@@ -44,6 +47,7 @@ export class AvatarStage {
     this.blink = 0;
     this.disposed = false;
     this.paused = false;
+    this.loadAbort = null;
     this.lastFrameWall = performance.now();
     this.maxTextureDim = 0;
   }
@@ -88,6 +92,7 @@ export class AvatarStage {
     const loader = new GLTFLoader();
     loader.register(parser => new VRMLoaderPlugin(parser));
     let gltf;
+    this.loadAbort = new AbortController();
     try {
       this.opts.onProgress?.('mesh', 0);
       let arrayBuffer = await this._fetchVRM('assets/vrm/OC-Lily.vrm',
@@ -102,9 +107,14 @@ export class AvatarStage {
       this.opts.onError?.(e);
       throw e;
     }
-    if (this.disposed) return;
+    if (this.disposed) { this._disposeGltf(gltf); return; }
     const vrm = gltf.userData.vrm;
-    if (!vrm) { const e = new Error('VRM extension missing'); this.opts.onError?.(e); throw e; }
+    if (!vrm) {
+      const e = new Error('VRM extension missing');
+      this._disposeGltf(gltf);
+      this.opts.onError?.(e);
+      throw e;
+    }
     if (vrm.meta?.metaVersion === '0') VRMUtils.rotateVRM0(vrm);
 
     // Cap anisotropy (VRAM/bandwidth) and audit texture dimensions.
@@ -151,27 +161,44 @@ export class AvatarStage {
     this.startLoop();
   }
 
-  /** Stream the VRM with progress; runs off the critical UI frame. */
+  _disposeGltf(gltf) {
+    const scene = gltf?.userData?.vrm?.scene || gltf?.scene;
+    if (scene) try { VRMUtils.deepDispose(scene); } catch {}
+  }
+
+  /**
+   * Stream into one final-sized staging allocation when Content-Length is
+   * known. Unknown-length responses use the browser's arrayBuffer path rather
+   * than retaining every network chunk plus a second full-size copy.
+   */
   async _fetchVRM(url, onProgress) {
-    const res = await fetch(url);
+    const res = await fetch(url, { signal: this.loadAbort?.signal });
     if (!res.ok) throw new Error('VRM fetch failed: HTTP ' + res.status);
     const total = Number(res.headers.get('Content-Length')) || 0;
-    if (!res.body || !res.body.getReader) return await res.arrayBuffer();
+    if (!res.body || !res.body.getReader || !total) return await res.arrayBuffer();
     const reader = res.body.getReader();
-    const chunks = [];
-    let received = 0, lastYield = performance.now();
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      chunks.push(value);
-      received += value.length;
-      if (total) onProgress?.(Math.min(1, received / total));
-      const now = performance.now();
-      if (now - lastYield > 12) { lastYield = now; await new Promise(r => setTimeout(r, 0)); }
+    const buf = new Uint8Array(total);
+    let received = 0, lastYield = performance.now(), lastProgress = 0;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (this.disposed) { await reader.cancel(); throw new Error('VRM load cancelled'); }
+        if (received + value.length > total) throw new Error('VRM response exceeded its declared size');
+        buf.set(value, received);
+        received += value.length;
+        const now = performance.now();
+        if (now - lastProgress >= 100) {
+          lastProgress = now;
+          onProgress?.(Math.min(1, received / total));
+        }
+        if (now - lastYield > 12) { lastYield = now; await new Promise(r => setTimeout(r, 0)); }
+      }
+    } finally {
+      reader.releaseLock();
     }
-    const buf = new Uint8Array(received);
-    let off = 0;
-    for (const ch of chunks) { buf.set(ch, off); off += ch.length; }
+    if (received !== total) throw new Error(`VRM download was truncated (${received}/${total} bytes)`);
+    onProgress?.(1);
     return buf.buffer;
   }
 
@@ -353,8 +380,9 @@ export class AvatarStage {
   }
 
   performAction(name) {
-    if (this.disposed || !this.vrm || !sampleAction(name, 0)) return false;
-    this.action = { name, t: 0 };
+    const initial = sampleAction(name, 0);
+    if (this.disposed || !this.vrm || !initial) return false;
+    this.action = { name, t: 0, duration: initial.duration };
     this.state = 'action';
     return true;
   }
@@ -371,24 +399,43 @@ export class AvatarStage {
   startLoop() {
     if (this.disposed || !this.renderer) return;
     cancelAnimationFrame(this.raf);
+    clearTimeout(this.frameTimer);
+    this.raf = null; this.frameTimer = null;
     this.last = performance.now();
-    const loop = () => {
+    const schedule = () => {
       if (this.disposed || this.paused || !this.vrm) return;
-      this.raf = requestAnimationFrame(loop);
+      const remaining = Math.max(0, 1000 / this.targetFps() - (performance.now() - this.last) - 2);
+      // Sleep until the next target frame instead of waking JavaScript on every
+      // 60/90/120 Hz display refresh merely to discard most callbacks.
+      this.frameTimer = setTimeout(() => {
+        this.frameTimer = null;
+        if (!this.disposed && !this.paused) this.raf = requestAnimationFrame(loop);
+      }, remaining);
+    };
+    const loop = () => {
+      this.raf = null;
+      if (this.disposed || this.paused || !this.vrm) return;
       const now = performance.now();
       const interval = 1000 / this.targetFps();
-      if (now - this.last < interval - 1) return;
-      const dt = Math.min((now - this.last) / 1000, 0.05);
-      this.last = now;
-      this.lastFrameWall = now;
-      this.update(dt);
-      this.controls?.update();
-      this.renderer.render(this.scene, this.camera);
+      if (now - this.last >= interval - 1) {
+        const dt = Math.min((now - this.last) / 1000, 0.05);
+        this.last = now;
+        this.lastFrameWall = now;
+        this.update(dt);
+        this.controls?.update();
+        this.renderer.render(this.scene, this.camera);
+      }
+      schedule();
     };
-    this.raf = requestAnimationFrame(loop);
+    schedule();
   }
 
-  pause() { this.paused = true; cancelAnimationFrame(this.raf); this.raf = null; }
+  pause() {
+    this.paused = true;
+    cancelAnimationFrame(this.raf);
+    clearTimeout(this.frameTimer);
+    this.raf = null; this.frameTimer = null;
+  }
   resume() { if (this.disposed || !this.paused) return; this.paused = false; this.startLoop(); }
 
   _resize() {
@@ -418,10 +465,13 @@ export class AvatarStage {
 
   update(dt) {
     this.time += dt;
-    const targets = {};
-    for (const name of POSE_BONES) targets[name] = { ...this.rest[name] };
+    const targets = this._targets;
+    for (const name of POSE_BONES) {
+      const r = this.rest[name] || EMPTY_EXPR, t = targets[name];
+      t.x = r.x || 0; t.y = r.y || 0; t.z = r.z || 0;
+    }
     let rootX = 0, rootY = 0, rootRotY = 0;
-    let expr = {};
+    let expr = EMPTY_EXPR;
 
     if (this.state === 'idle' || this.state === 'action') {
       targets.spine.x += 0.016 * Math.sin(this.time * 1.35) * AXES.pitch;
@@ -466,11 +516,11 @@ export class AvatarStage {
     let ikOverride = null, ikWeight = 0, waveOsc = 0;
     if (this.state === 'action' && this.action) {
       const a = this.action;
-      const sampled = sampleAction(a.name, 0);
       a.t += dt;
-      const p = clamp(a.t / sampled.duration, 0, 1);
+      const p = clamp(a.t / a.duration, 0, 1);
       const s = sampleAction(a.name, p);
-      for (const [bone, off] of Object.entries(s.bones)) {
+      for (const bone in s.bones) {
+        const off = s.bones[bone];
         if (!targets[bone] || !off) continue;
         targets[bone].x += off.x || 0;
         targets[bone].y += off.y || 0;
@@ -497,17 +547,19 @@ export class AvatarStage {
     for (const name of POSE_BONES) {
       const bone = this.bones[name];
       if (!bone) continue;
-      const cur = this.current[name];
-      let tgt = targets[name];
+      const cur = this.current[name], tgt = targets[name];
+      let tx = tgt.x, ty = tgt.y, tz = tgt.z;
       if (ikOverride && ikOverride[name]) {
         const ik = ikOverride[name], r = this.rest[name];
-        tgt = { x: r.x + (ik.x - r.x) * ikWeight, y: r.y + (ik.y - r.y) * ikWeight, z: r.z + (ik.z - r.z) * ikWeight };
-        if (name === 'rightLowerArm') tgt.z += waveOsc;
-        if (name === 'rightHand') tgt.z += waveOsc * 0.6;
+        tx = r.x + (ik.x - r.x) * ikWeight;
+        ty = r.y + (ik.y - r.y) * ikWeight;
+        tz = r.z + (ik.z - r.z) * ikWeight;
+        if (name === 'rightLowerArm') tz += waveOsc;
+        if (name === 'rightHand') tz += waveOsc * 0.6;
       }
-      cur.x += (tgt.x - cur.x) * k;
-      cur.y += (tgt.y - cur.y) * k;
-      cur.z += (tgt.z - cur.z) * k;
+      cur.x += (tx - cur.x) * k;
+      cur.y += (ty - cur.y) * k;
+      cur.z += (tz - cur.z) * k;
       bone.rotation.set(cur.x, cur.y, cur.z);
     }
     this.root.position.set(rootX, rootY, 0);
@@ -522,14 +574,14 @@ export class AvatarStage {
       this.visemeT += dt;
       if (this.visemeT > 0.09) { this.visemeT = 0; this.visemeIdx = (this.visemeIdx + 1 + Math.floor(Math.random() * 2)) % VISEMES.length; }
       const mouth = clamp(this.speakLevel * 2.4, 0, 1);
-      VISEMES.forEach((v, i) => {
-        const base = expr[v] || 0;
+      for (let i = 0; i < VISEMES.length; i++) {
+        const v = VISEMES[i], base = expr[v] || 0;
         em.setValue(v, Math.max(base, i === this.visemeIdx ? mouth : mouth * 0.12));
-      });
+      }
       for (const name of ['happy', 'angry', 'sad', 'relaxed', 'surprised', 'neutral', 'blush']) {
         if (!(name in expr)) em.setValue(name, 0);
       }
-      for (const [name, v] of Object.entries(expr)) em.setValue(name, v);
+      for (const name in expr) em.setValue(name, expr[name]);
     }
 
     this.vrm.update(dt);
@@ -537,6 +589,7 @@ export class AvatarStage {
 
   dispose() {
     this.disposed = true;
+    try { this.loadAbort?.abort(); } catch {}
     this.pause();
     try { this.controls?.dispose(); } catch {}
     try { this.ro?.disconnect(); } catch {}
@@ -552,8 +605,9 @@ export class AvatarStage {
       });
     } catch {}
     try { this.renderer?.dispose(); } catch {}
+    try { this.renderer?.forceContextLoss(); } catch {}
     try { this.container.innerHTML = ''; } catch {}
-    this.vrm = null; this.scene = null; this.renderer = null; this.controls = null;
+    this.vrm = null; this.scene = null; this.renderer = null; this.controls = null; this.root = null; this.loadAbort = null;
   }
 }
 

@@ -37,9 +37,13 @@ import com.k2fsa.sherpa.onnx.Vad
 import com.k2fsa.sherpa.onnx.VadModelConfig
 import org.json.JSONObject
 import java.io.File
+import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.locks.ReentrantLock
 import kotlin.math.sqrt
 
 /**
@@ -54,10 +58,22 @@ class SpeechEngine(
     private val ctx: Context,
     private val emit: (String, String) -> Unit,
 ) {
-    companion object { private const val TAG = "VaniSpeech" }
+    companion object {
+        private const val TAG = "VaniSpeech"
+        private const val MAX_PENDING_DECODES = 3
+        private const val MAX_PTT_SAMPLES = 16000 * 60 // one minute; fail honestly instead of growing heap forever
+    }
 
+    // Model allocation and TTS stay serialized. ASR decoding has its own bounded
+    // executor so a long transcription can never create an unbounded frame queue.
     private val exec = Executors.newSingleThreadExecutor()
+    private val decodeExec = ThreadPoolExecutor(
+        1, 1, 0L, TimeUnit.MILLISECONDS, ArrayBlockingQueue(MAX_PENDING_DECODES),
+    ) { runnable -> Thread(runnable, "vani-asr-decode") }
     private val main = Handler(Looper.getMainLooper())
+    private val recognizerLock = ReentrantLock(true)
+    private val vadLock = Any()
+    private val pttLock = Any()
 
     // ---- TTS state ----
     @Volatile private var ttsEngine = "phonon"
@@ -89,11 +105,12 @@ class SpeechEngine(
     }
 
     // ---- ASR state ----
-    private var vad: Vad? = null
+    @Volatile private var vad: Vad? = null
     @Volatile private var recognizer: OfflineRecognizer? = null
     private var systemRecognizer: SpeechRecognizer? = null
     @Volatile private var asrActive = false
-    private var asrMode = "vad"
+    @Volatile private var asrMode = "vad"
+    @Volatile private var captureGeneration = 0L
     @Volatile private var asrEngine = "system"
     @Volatile private var asrOnce = false
     @Volatile private var asrErrorRetries = 0
@@ -104,13 +121,23 @@ class SpeechEngine(
     private var asrLoadedLanguage = ""
     private var wasSpeech = false
     private val pttBuffer = ArrayList<FloatArray>()
-    private var audioBridge: VaniAudioBridge? = null
+    private var pttSamples = 0
+    private var pttLimitReported = false
+    @Volatile private var audioBridge: VaniAudioBridge? = null
 
-    private fun ok(id: String, payload: String = "{}") = MainActivity.instance?.resolve(id, true, payload)
+    private fun ok(id: String, payload: String = "{}") = (ctx as? MainActivity)?.resolve(id, true, payload)
     private fun err(id: String, msg: String) =
-        MainActivity.instance?.resolve(id, false, JSONObject().put("error", msg).toString())
+        (ctx as? MainActivity)?.resolve(id, false, JSONObject().put("error", msg).toString())
 
     private fun ev(event: String, obj: JSONObject) = emit(event, obj.toString())
+
+    private fun clearPttBuffer() {
+        synchronized(pttLock) {
+            pttBuffer.clear()
+            pttSamples = 0
+            pttLimitReported = false
+        }
+    }
 
     private fun ttsStatus(): JSONObject = JSONObject().apply {
         put("state", if (ttsLoading) "loading" else if (tts != null) "ready" else "idle")
@@ -216,7 +243,10 @@ class SpeechEngine(
                 systemTtsReady = status == TextToSpeech.SUCCESS
                 systemTts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                     override fun onStart(utteranceId: String?) {
+                        val uid = currentUtterId
+                        if (uid == null || (utteranceId != null && utteranceId != uid)) return
                         systemSpeaking = true
+                        main.removeCallbacks(levelTicker)
                         main.post(levelTicker)
                     }
                     override fun onDone(utteranceId: String?) { finishSystemUtter(false, utteranceId) }
@@ -233,10 +263,10 @@ class SpeechEngine(
     }
 
     private fun finishSystemUtter(interrupted: Boolean, expectedId: String? = null) {
-        systemSpeaking = false
-        main.removeCallbacks(levelTicker)
         val uid = currentUtterId ?: return
         if (expectedId != null && uid != expectedId) return
+        systemSpeaking = false
+        main.removeCallbacks(levelTicker)
         currentUtterId = null
         activeSpeech = null
         ev("tts.end", JSONObject().put("utterId", uid).put("interrupted", interrupted))
@@ -389,7 +419,9 @@ class SpeechEngine(
                         val deadline = SystemClock.elapsedRealtime() + drainMs
                         while (!job.cancelled && track.playState == AudioTrack.PLAYSTATE_PLAYING &&
                             track.playbackHeadPosition.toLong() < framesWritten && SystemClock.elapsedRealtime() < deadline) {
-                            SystemClock.sleep(10)
+                            // Playback drain is not latency-critical; avoid a
+                            // 100 Hz polling loop on the speech worker.
+                            SystemClock.sleep(50)
                         }
                     }
                     try { track?.stop(); track?.release() } catch (_: Exception) {}
@@ -404,28 +436,37 @@ class SpeechEngine(
         } else if (engine == "system") {
             main.post {
                 ensureSystemTts()
-                val t = systemTts
-                if (t == null || !systemTtsReady) {
-                    main.postDelayed({
-                        val t2 = systemTts
-                        if (t2 != null && systemTtsReady && currentUtterId == utterId) {
-                            t2.setSpeechRate(ttsSpeed)
-                            t2.speak(text, TextToSpeech.QUEUE_FLUSH, null, utterId)
-                        } else if (currentUtterId == utterId) {
-                            currentUtterId = null
-                            ev("tts.error", JSONObject().put("utterId", utterId).put("error", "System speech service unavailable"))
-                        }
-                    }, 700)
-                } else {
-                    t.setSpeechRate(ttsSpeed)
-                    t.speak(text, TextToSpeech.QUEUE_FLUSH, null, utterId)
-                }
+                if (systemTts != null && systemTtsReady) startSystemUtterance(text, utterId)
+                else main.postDelayed({
+                    if (currentUtterId != utterId) return@postDelayed
+                    if (systemTts != null && systemTtsReady) startSystemUtterance(text, utterId)
+                    else failSystemUtterance(utterId, "System speech service unavailable")
+                }, 700)
             }
         } else {
             activeSpeech = null
             if (currentUtterId == utterId) currentUtterId = null
             ev("tts.error", JSONObject().put("utterId", utterId).put("error", "Selected voice is not configured"))
         }
+    }
+
+    private fun startSystemUtterance(text: String, utterId: String) {
+        if (currentUtterId != utterId) return
+        val engine = systemTts ?: run { failSystemUtterance(utterId, "System speech service unavailable"); return }
+        try {
+            engine.setSpeechRate(ttsSpeed)
+            val result = engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, utterId)
+            if (result != TextToSpeech.SUCCESS) failSystemUtterance(utterId, "System speech could not start ($result)")
+        } catch (e: Throwable) {
+            Log.e(TAG, "system tts", e)
+            failSystemUtterance(utterId, e.message ?: "System speech could not start")
+        }
+    }
+
+    private fun failSystemUtterance(utterId: String, message: String) {
+        if (currentUtterId != utterId) return
+        ev("tts.error", JSONObject().put("utterId", utterId).put("error", message))
+        finishSystemUtter(false, utterId)
     }
 
     private fun emitLevel(utterId: String, level: Float) {
@@ -437,8 +478,16 @@ class SpeechEngine(
         val job = activeSpeech
         job?.cancelled = true
         try { job?.track?.stop() } catch (_: Exception) {}
+        if (Looper.myLooper() == Looper.getMainLooper()) stopSystemTtsOnMain()
+        else main.post(::stopSystemTtsOnMain)
+    }
+
+    private fun stopSystemTtsOnMain() {
         try { systemTts?.stop() } catch (_: Exception) {}
-        if (systemSpeaking) finishSystemUtter(true)
+        // Also cancel an utterance waiting for asynchronous TextToSpeech init.
+        if (systemSpeaking || (ttsEngine == "system" && currentUtterId != null)) {
+            finishSystemUtter(true)
+        }
     }
 
     /* ============================ ASR ============================ */
@@ -567,7 +616,7 @@ class SpeechEngine(
                 asrErrorRetries = 0
                 asrActive = true
                 wasSpeech = false
-                pttBuffer.clear()
+                clearPttBuffer()
                 if (isOfflineAsr(engine)) {
                     if (recognizer == null || asrEngine != engine || asrModelPath != dir || asrLoadedLanguage != language) {
                         asrLoading = true
@@ -624,31 +673,42 @@ class SpeechEngine(
     }
 
     private fun startSystemRecognizer(mode: String, language: String) {
+        val generation = captureGeneration
         main.post {
+            try {
+            if (generation != captureGeneration || !asrActive) return@post
             // Never two mic consumers: the system recognizer owns the mic alone.
             try { audioBridge?.stop() } catch (_: Exception) {}
             audioBridge = null
             if (!asrActive) return@post
             if (!SpeechRecognizer.isRecognitionAvailable(ctx)) {
+                asrActive = false
                 ev("asr.error", JSONObject().put("error", "No speech recognizer on this device. Install Whisper for offline ears."))
+                stopAsr()
                 return@post
             }
             val r = SpeechRecognizer.createSpeechRecognizer(ctx)
             systemRecognizer = r
             r.setRecognitionListener(object : RecognitionListener {
-                override fun onReadyForSpeech(params: Bundle?) { asrErrorRetries = 0 }
+                override fun onReadyForSpeech(params: Bundle?) {
+                    if (generation == captureGeneration) asrErrorRetries = 0
+                }
                 override fun onBeginningOfSpeech() {
+                    if (generation != captureGeneration) return
                     bargeIn()
                     ev("asr.speechStart", JSONObject())
                 }
                 override fun onRmsChanged(rmsdB: Float) {}
                 override fun onBufferReceived(buffer: ByteArray?) {}
-                override fun onEndOfSpeech() { ev("asr.speechEnd", JSONObject()) }
+                override fun onEndOfSpeech() {
+                    if (generation == captureGeneration) ev("asr.speechEnd", JSONObject())
+                }
                 override fun onError(error: Int) {
-                    if (!asrActive) return
+                    if (generation != captureGeneration || !asrActive) return
                     if (asrOnce) {
                         asrActive = false
                         ev("asr.error", JSONObject().put("error", "Speech recognizer error: $error"))
+                        stopAsr()
                         return
                     }
                     if (asrMode == "vad") {
@@ -656,22 +716,31 @@ class SpeechEngine(
                         if (asrErrorRetries > 2) {
                             asrActive = false
                             ev("asr.error", JSONObject().put("error", "Speech recognizer stopped after repeated errors"))
+                            stopAsr()
                         } else main.postDelayed({ if (asrActive && asrEngine == "system") listenSystem(language) }, 350)
                     }
                 }
                 override fun onResults(results: Bundle?) {
+                    if (generation != captureGeneration) return
                     val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull() ?: ""
                     if (text.isNotBlank()) ev("asr.final", JSONObject().put("text", text))
                     if (asrOnce) { asrActive = false; stopAsr() }
                     else if (asrActive && asrMode == "vad") listenSystem(language)
                 }
                 override fun onPartialResults(partialResults: Bundle?) {
+                    if (generation != captureGeneration) return
                     val text = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull() ?: ""
                     if (text.isNotBlank()) ev("asr.partial", JSONObject().put("text", text))
                 }
                 override fun onEvent(eventType: Int, params: Bundle?) {}
             })
             listenSystem(language)
+            } catch (t: Throwable) {
+                Log.e(TAG, "system recognizer", t)
+                asrActive = false
+                ev("asr.error", JSONObject().put("error", t.message ?: "System speech recognizer failed to start"))
+                stopAsr()
+            }
         }
     }
 
@@ -684,22 +753,43 @@ class SpeechEngine(
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
             if (android.os.Build.VERSION.SDK_INT >= 33) putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
         }
-        try { r.startListening(intent) } catch (e: Exception) { Log.w(TAG, "system listen", e) }
+        try { r.startListening(intent) } catch (t: Throwable) {
+            Log.e(TAG, "system listen", t)
+            asrActive = false
+            ev("asr.error", JSONObject().put("error", t.message ?: "Could not start system speech recognition"))
+            stopAsr()
+        }
     }
 
-    /** Native PCM path: VaniAudioBridge feeds 16 kHz mono floats directly (no
-     *  getUserMedia, no base64 JS round-trip). This is the ONLY mic consumer. */
-    fun feedSamples(samples: FloatArray) {
-        if (!asrActive || !isOfflineAsr(asrEngine)) return
-        exec.submit {
-            if (!asrActive) return@submit
-            try {
-                if (asrMode == "ptt") {
-                    pttBuffer.add(samples)
-                    return@submit
+    /**
+     * Native PCM path. VAD is cheap and runs synchronously on the capture thread;
+     * expensive recognition is dispatched as bounded utterance work. No executor
+     * task or FloatArray copy is queued for every 100 ms audio frame.
+     */
+    fun feedSamples(samples: FloatArray, len: Int = samples.size) {
+        if (!asrActive || !isOfflineAsr(asrEngine) || len <= 0) return
+        try {
+            if (asrMode == "ptt") {
+                synchronized(pttLock) {
+                    if (!asrActive) return
+                    if (pttSamples + len > MAX_PTT_SAMPLES) {
+                        if (!pttLimitReported) {
+                            pttLimitReported = true
+                            ev("asr.error", JSONObject().put("error", "Push-to-talk is limited to 60 seconds per turn. Release and send this recording, then start a new one."))
+                        }
+                        return
+                    }
+                    pttBuffer.add(samples.copyOf(len))
+                    pttSamples += len
                 }
-                val v = vad ?: return@submit
-                v.acceptWaveform(samples)
+                return
+            }
+
+            synchronized(vadLock) {
+                if (!asrActive) return
+                val v = vad ?: return
+                val frame = if (len == samples.size) samples else samples.copyOf(len)
+                v.acceptWaveform(frame)
                 val speaking = v.isSpeechDetected()
                 if (speaking && !wasSpeech) {
                     wasSpeech = true
@@ -712,10 +802,24 @@ class SpeechEngine(
                     val seg = v.front()
                     v.pop()
                     ev("asr.speechEnd", JSONObject())
-                    decodeSegment(seg.samples)
+                    submitDecode(seg.samples, captureGeneration)
                 }
-            } catch (e: Exception) {
-                Log.w(TAG, "feedSamples", e)
+            }
+        } catch (t: Throwable) {
+            Log.e(TAG, "feedSamples", t)
+            asrActive = false
+            ev("asr.error", JSONObject().put("error", "Microphone processing stopped: ${t.message ?: "native audio error"}"))
+            stopAsr()
+        }
+    }
+
+    private fun submitDecode(samples: FloatArray, generation: Long) {
+        if (samples.size < 4800 || generation != captureGeneration || !asrActive) return
+        try {
+            decodeExec.execute { decodeSegment(samples, generation) }
+        } catch (e: RejectedExecutionException) {
+            if (generation == captureGeneration && asrActive) {
+                ev("asr.error", JSONObject().put("error", "Previous speech is still being transcribed. Please wait a moment before the next turn."))
             }
         }
     }
@@ -736,11 +840,14 @@ class SpeechEngine(
     /** Start the single native mic consumer and report the actual AudioRecord
      * result to the background ASR executor. Never blocks the Android UI thread. */
     private fun startNativeCapture(): Boolean {
-        if (Looper.myLooper() == Looper.getMainLooper()) return startNativeCaptureOnMain()
+        val generation = captureGeneration
+        if (Looper.myLooper() == Looper.getMainLooper()) return startNativeCaptureOnMain(generation)
         val latch = CountDownLatch(1)
         var started = false
         main.post {
-            try { started = startNativeCaptureOnMain() }
+            try {
+                started = if (generation == captureGeneration && asrActive) startNativeCaptureOnMain(generation) else false
+            }
             catch (e: Throwable) { Log.e(TAG, "native capture", e); started = false }
             finally { latch.countDown() }
         }
@@ -752,15 +859,18 @@ class SpeechEngine(
         }
     }
 
-    private fun startNativeCaptureOnMain(): Boolean {
+    private fun startNativeCaptureOnMain(generation: Long): Boolean {
+        if (generation != captureGeneration || !asrActive) return false
         try { audioBridge?.stop() } catch (_: Exception) {}
         audioBridge = null
-        val activity = MainActivity.instance ?: return false
-        val ab = VaniAudioBridge(activity) { samples, len ->
-            // Copy: the capture thread reuses its buffer; ASR runs async.
-            feedSamples(samples.copyOf(len))
-        }
+        val activity = ctx as? MainActivity ?: return false
+        if (activity.isDestroyed) return false
+        val ab = VaniAudioBridge(activity) { samples, len -> feedSamples(samples, len) }
         if (!ab.start()) return false
+        if (generation != captureGeneration || !asrActive || activity.isDestroyed) {
+            ab.stop()
+            return false
+        }
         audioBridge = ab
         return true
     }
@@ -770,42 +880,54 @@ class SpeechEngine(
             main.post { try { systemRecognizer?.stopListening() } catch (_: Exception) {} }
             return
         }
-        exec.submit {
-            try {
-                val total = pttBuffer.sumOf { it.size }
-                if (total < 1600) { pttBuffer.clear(); return@submit }
-                val all = FloatArray(total)
-                var off = 0
-                for (chunk in pttBuffer) { System.arraycopy(chunk, 0, all, off, chunk.size); off += chunk.size }
-                pttBuffer.clear()
-                decodeSegment(all)
-            } catch (e: Exception) {
-                Log.w(TAG, "ptt release", e)
+        val generation = captureGeneration
+        val all = synchronized(pttLock) {
+            if (pttSamples < 1600) {
+                clearPttBuffer()
+                return
             }
+            val merged = FloatArray(pttSamples)
+            var off = 0
+            for (chunk in pttBuffer) {
+                System.arraycopy(chunk, 0, merged, off, chunk.size)
+                off += chunk.size
+            }
+            clearPttBuffer()
+            merged
         }
+        submitDecode(all, generation)
     }
 
-    private fun decodeSegment(samples: FloatArray) {
-        val r = recognizer ?: return
-        if (samples.size < 4800) return // <0.3 s
-        val stream = try { r.createStream() } catch (e: Exception) {
-            Log.w(TAG, "create ASR stream", e)
-            return
-        }
+    private fun decodeSegment(samples: FloatArray, generation: Long) {
+        recognizerLock.lock()
         try {
-            stream.acceptWaveform(samples, 16000)
-            r.decode(stream)
-            val result = r.getResult(stream)
-            val text = result.text.trim()
-            if (text.isNotEmpty()) {
-                ev("asr.final", JSONObject().put("text", text))
-                if (asrOnce) { asrActive = false; stopAsr() }
+            if (generation != captureGeneration || !asrActive) return
+            val r = recognizer ?: return
+            val stream = r.createStream()
+            try {
+                stream.acceptWaveform(samples, 16000)
+                r.decode(stream)
+                val result = r.getResult(stream)
+                val text = result.text.trim()
+                // A previous Live/dictation session must never emit into a new one.
+                if (generation != captureGeneration || !asrActive) return
+                if (text.isNotEmpty()) {
+                    ev("asr.final", JSONObject().put("text", text))
+                    if (asrOnce) {
+                        asrActive = false
+                        stopAsr()
+                    }
+                }
+            } finally {
+                try { stream.release() } catch (_: Exception) {}
             }
-        } catch (e: Exception) {
-            Log.w(TAG, "decode", e)
-            ev("asr.error", JSONObject().put("error", "Offline speech decoding failed: ${e.message ?: "native error"}"))
+        } catch (t: Throwable) {
+            Log.w(TAG, "decode", t)
+            if (generation == captureGeneration && asrActive) {
+                ev("asr.error", JSONObject().put("error", "Offline speech decoding failed: ${t.message ?: "native error"}"))
+            }
         } finally {
-            try { stream.release() } catch (_: Exception) {}
+            recognizerLock.unlock()
         }
     }
 
@@ -840,12 +962,16 @@ class SpeechEngine(
     }
 
     private fun releaseCaptureInternal() {
-        try { audioBridge?.stop() } catch (_: Exception) {}
+        captureGeneration++
+        val bridge = audioBridge
         audioBridge = null
-        try { vad?.release() } catch (_: Exception) {}
-        vad = null
-        pttBuffer.clear()
-        wasSpeech = false
+        try { bridge?.stop() } catch (_: Exception) {}
+        synchronized(vadLock) {
+            try { vad?.release() } catch (_: Exception) {}
+            vad = null
+            wasSpeech = false
+        }
+        clearPttBuffer()
         main.post {
             try { systemRecognizer?.destroy() } catch (_: Exception) {}
             systemRecognizer = null
@@ -853,12 +979,17 @@ class SpeechEngine(
     }
 
     private fun releaseAsrModelInternal() {
-        try { recognizer?.release() } catch (e: Throwable) { Log.w(TAG, "asr release", e) }
-        recognizer = null
-        asrModelPath = null
-        asrModelId = null
-        asrModelName = null
-        asrLoadedLanguage = ""
+        recognizerLock.lock()
+        try {
+            try { recognizer?.release() } catch (e: Throwable) { Log.w(TAG, "asr release", e) }
+            recognizer = null
+            asrModelPath = null
+            asrModelId = null
+            asrModelName = null
+            asrLoadedLanguage = ""
+        } finally {
+            recognizerLock.unlock()
+        }
     }
 
     /** Synchronous cross-engine barrier used only before Omni allocation. */
@@ -899,15 +1030,37 @@ class SpeechEngine(
         }
     }
 
+    /** Trim only transient capture/decode work; resident models stay untouched. */
+    fun trimMemory() {
+        if (!asrActive) {
+            captureGeneration++
+            clearPttBuffer()
+            decodeExec.queue.clear()
+        }
+    }
+
     fun release() {
         asrActive = false
+        captureGeneration++
         stopTts()
-        exec.submit {
-            releaseCaptureInternal()
-            releaseAsrModelInternal()
-            releaseTtsModelInternal()
+        try {
+            exec.submit {
+                releaseCaptureInternal()
+                releaseAsrModelInternal()
+                releaseTtsModelInternal()
+            }
+        } catch (e: RejectedExecutionException) {
+            Log.w(TAG, "speech executor already released")
         }
-        main.post { try { systemTts?.shutdown() } catch (_: Exception) {} ; systemTts = null }
+        main.post {
+            main.removeCallbacks(levelTicker)
+            try { systemRecognizer?.destroy() } catch (_: Exception) {}
+            systemRecognizer = null
+            try { systemTts?.shutdown() } catch (_: Exception) {}
+            systemTts = null
+            systemTtsReady = false
+        }
         exec.shutdown()
+        decodeExec.shutdown()
     }
 }

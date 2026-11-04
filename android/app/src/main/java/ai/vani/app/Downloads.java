@@ -5,7 +5,9 @@ import android.content.Context;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import android.util.AtomicFile;
 import java.io.File;
+import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 
@@ -22,8 +24,16 @@ public final class Downloads {
     }
 
     public static synchronized void save(Context ctx, JSONArray arr) {
-        try { Files.write(file(ctx).toPath(), arr.toString().getBytes(StandardCharsets.UTF_8)); }
-        catch (Exception ignored) {}
+        AtomicFile atomic = new AtomicFile(file(ctx));
+        FileOutputStream out = null;
+        try {
+            out = atomic.startWrite();
+            out.write(arr.toString().getBytes(StandardCharsets.UTF_8));
+            atomic.finishWrite(out);
+            out = null;
+        } catch (Exception ignored) {
+            if (out != null) atomic.failWrite(out);
+        }
     }
 
     public static synchronized void upsert(Context ctx, JSONObject entry) {

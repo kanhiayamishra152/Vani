@@ -16,10 +16,16 @@ import { ANIME_ACTIONS } from './catalog.js';
 import * as voice from './voice.js';
 
 let open = false;
+let closing = false;
+let liveSession = 0;
+let listeningPromise = null;
 let avatar = null;
+let avatarInitPromise = null;
+let avatarLoadFailed = false;
 let mode = 'vad';
 let muted = false;
 let gen = null;
+let conversationTurn = 0;
 let pendingAction = null;
 let speechQueue = [];
 let speaking = false;
@@ -28,6 +34,7 @@ let assistantMsg = null;
 let rawReply = '';
 let pttHeld = false;
 let listeningActive = false;
+let listeningMode = null;
 let thinkWatchdog = null;
 let thinkReassure = null;
 let spokenConsumed = 0;
@@ -42,8 +49,10 @@ export const isLiveOpen = () => open;
 
 /* ============================ open / close ============================ */
 export async function openLive(opts = {}) {
-  if (open) { if (opts.action) avatar?.performAction(opts.action); return; }
+  if (open) { if (!closing && opts.action) avatar?.performAction(opts.action); return; }
+  const session = ++liveSession;
   open = true;
+  closing = false;
   pendingAction = opts.action || null;
   const root = $('#live-root');
   root.hidden = false;
@@ -110,50 +119,93 @@ export async function openLive(opts = {}) {
 
   store.ensureThread();
   if (avatar && avatar.renderer && !avatar.disposed) {
-    avatar.remount($('#live-stage'));
-    if (pendingAction) { avatar.performAction(pendingAction); pendingAction = null; }
+    const stage = avatar;
+    stage.remount($('#live-stage'));
+    if (avatarLoadFailed) showAvatarFallback();
+    else if (!stage.vrm && avatarInitPromise) {
+      try { await avatarInitPromise; }
+      catch (e) {
+        avatarLoadFailed = true;
+        if (avatar === stage) avatarInitPromise = null;
+        if (session === liveSession && open) showAvatarFallback();
+        console.warn('avatar remount init', e);
+      }
+      if (session !== liveSession || !open || closing || avatar !== stage) return;
+      if (!avatarLoadFailed && stage.vrm) { stage.walkIn(); setStatus('Walking in…'); }
+    }
+    if (pendingAction && stage.vrm) { stage.performAction(pendingAction); pendingAction = null; }
   } else {
     setStatus('Loading OC-Lily…');
+    avatarLoadFailed = false;
     avatar = new AvatarStage($('#live-stage'), {
       batterySaver: () => settings.batterySaver,
       fpsTarget: () => settings.fpsTarget,
       onProgress: (stage, p) => {
+        if (session !== liveSession || !open) return;
         const label = stage === 'mesh' ? `Loading avatar mesh… ${Math.round(p * 100)}%`
           : stage === 'shaders' ? 'Compiling shaders…' : 'Ready';
         setStatus(label);
       },
       onArrive: () => {
+        if (session !== liveSession || !open || closing) return;
         if (pendingAction) { avatar?.performAction(pendingAction); pendingAction = null; }
         speakDirect('Hello!');
       },
-      onError: () => {
-        const stage = $('#live-stage');
-        if (stage) stage.innerHTML = `<div class="live-fallback"><div><img src="assets/logo-mark.svg" style="width:52px;height:52px;margin-bottom:14px" alt=""><p>OC-Lily.vrm is bundled in the Android APK.<br>The web preview cannot fetch Google Drive assets.</p></div></div>`;
-      },
+      onError: () => { if (session === liveSession && open) showAvatarFallback(); },
     });
+    const created = avatar;
     try {
-      await avatar.init();
-      avatar.walkIn();
+      avatarInitPromise = created.init();
+      await avatarInitPromise;
+      if (avatar === created) avatarInitPromise = null;
+      if (session !== liveSession || !open || closing || avatar !== created) return;
+      created.walkIn();
       setStatus('Walking in…');
-    } catch { /* fallback panel already shown */ }
+    } catch (e) {
+      avatarLoadFailed = true;
+      if (avatar === created) { created.pause(); avatarInitPromise = null; }
+      if (session === liveSession && open) showAvatarFallback();
+      console.warn('avatar init', e);
+    }
   }
 
-  await setupVoice();
+  if (session === liveSession && open && !closing) await setupVoice(session);
+}
+
+function showAvatarFallback() {
+  const stage = $('#live-stage');
+  if (!stage) return;
+  stage.querySelector('.live-fallback')?.remove();
+  const panel = document.createElement('div');
+  panel.className = 'live-fallback';
+  panel.innerHTML = `<div><img src="assets/logo-mark.svg" style="width:52px;height:52px;margin-bottom:14px" alt=""><p>OC-Lily.vrm is bundled in the Android APK.<br>The web preview cannot fetch Google Drive assets.</p></div>`;
+  // Keep the singleton canvas attached; the fallback is an overlay, not a
+  // replacement that would cause a black/remount transition on the next open.
+  stage.appendChild(panel);
 }
 
 export async function closeLive() {
+  if (closing) return;
+  closing = true;
+  ++liveSession; // invalidate every async callback owned by the old session
+  ++conversationTurn;
   try {
     gen?.stop(); gen = null;
+    flushReply();
     clearThinkWatchdog();
     speechQueue = [];
+    speaking = false;
     voice.stopSpeech();
-    await voice.stopListening();
-    listeningActive = false;
+    // Keep the singleton (and an in-flight first load) for a fast remount;
+    // session invalidation above prevents it from restarting voice after close.
     avatar?.pause();
+    await stopVad();
   } catch (e) {
     console.warn('live teardown', e);
+    listeningActive = false;
   } finally {
     open = false;
+    closing = false;
     const root = $('#live-root');
     root.hidden = true;
     root.innerHTML = '';
@@ -227,11 +279,12 @@ function sendKeyboardMessage() {
 }
 
 /* ============================ voice loop ============================ */
-async function setupVoice() {
+async function setupVoice(session = liveSession) {
   const hint = $('#live-hint');
-  if (!hasNative()) { hint.textContent = 'Web preview — install the APK for the hands-free voice loop.'; return; }
+  if (!hasNative()) { if (hint) hint.textContent = 'Web preview — install the APK for the hands-free voice loop.'; return; }
   try { await voice.configureVoice(); }
-  catch (e) { hint.textContent = e.message || 'Selected voice is unavailable'; }
+  catch (e) { if (hint && session === liveSession) hint.textContent = e.message || 'Selected voice is unavailable'; }
+  if (session !== liveSession || !open || closing) return;
   if (!isReady()) { hint.textContent = 'Load a model in Model Hub to talk. Avatar actions still work.'; }
   else if (!voice.offlineVoiceReady()) { hint.textContent = 'Tip: install Whisper (Supplementary) for fully offline ears. Using the Android recognizer for now.'; }
   else { hint.textContent = mode === 'vad' ? 'Just speak — I am listening.' : 'Hold the mic button to talk.'; }
@@ -239,27 +292,50 @@ async function setupVoice() {
 }
 
 async function startVad() {
-  if (listeningActive || !hasNative()) return;
-  try {
-    await voice.startListening('vad', {
-      onSpeechStart: bargeIn,
-      onFinal: handleUserUtterance,
-      onError: e => { $('#live-hint') && ($('#live-hint').textContent = e.message); },
+  if (!open || closing || listeningActive || !hasNative()) return;
+  if (listeningPromise) {
+    const pending = listeningPromise;
+    Promise.resolve(pending).finally(() => {
+      if (open && !closing && mode === 'vad' && !muted && $('#live-keyboard')?.hidden && !listeningActive && !listeningPromise) startVad();
     });
-    listeningActive = true;
-    if (!gen && !speaking) setStatus('Listening');
-  } catch (e) {
-    $('#live-hint') && ($('#live-hint').textContent = e.message);
+    return;
   }
+  const session = liveSession;
+  listeningPromise = (async () => {
+    try {
+      const started = await voice.startListening('vad', {
+        onSpeechStart: () => { if (session === liveSession) bargeIn(); },
+        onFinal: text => { if (session === liveSession) handleUserUtterance(text); },
+        onError: e => { if (session === liveSession && $('#live-hint')) $('#live-hint').textContent = e.message; },
+      });
+      if (!started) return;
+      if (session !== liveSession || !open || closing) { await voice.stopListening(); return; }
+      listeningActive = true;
+      listeningMode = 'vad';
+      if (!gen && !speaking) setStatus('Listening');
+    } catch (e) {
+      if (session === liveSession && $('#live-hint')) $('#live-hint').textContent = e.message;
+    } finally {
+      listeningPromise = null;
+    }
+  })();
+  return listeningPromise;
 }
 
 async function stopVad() {
-  if (!listeningActive) return;
+  const pending = listeningPromise;
+  if (!pending && !listeningActive) return;
   listeningActive = false;
+  listeningMode = null;
+  // Invalidate listenSeq before waiting for permission/model initialization.
   await voice.stopListening();
+  if (pending) {
+    try { await pending; } catch { /* the start path reports its own error */ }
+  }
 }
 
 function bargeIn() {
+  ++conversationTurn;
   speechQueue = [];
   voice.stopSpeech();
   avatar?.setSpeaking(0);
@@ -290,22 +366,44 @@ function wirePtt() {
     e.preventDefault();
     if (!hasNative()) { toast('Voice needs the Android app'); return; }
     if (mode === 'vad') { bargeIn(); return; }
-    if (pttHeld) return;
+    if (pttHeld || closing) return;
+    const session = liveSession;
     pttHeld = true;
     btn.classList.add('holding');
     bargeIn();
     try {
+      if (listeningPromise || (listeningActive && listeningMode !== 'ptt')) await stopVad();
+      if (session !== liveSession || !open || closing) { pttHeld = false; btn.classList.remove('holding'); return; }
       if (!listeningActive) {
-        await voice.startListening('ptt', { onFinal: handleUserUtterance, onError: err => toast(err.message) });
+        const starting = voice.startListening('ptt', {
+          onFinal: text => { if (session === liveSession) handleUserUtterance(text); },
+          onError: err => { if (session === liveSession) toast(err.message); },
+        });
+        listeningPromise = starting;
+        let started;
+        try { started = await starting; }
+        finally { if (listeningPromise === starting) listeningPromise = null; }
+        if (!started) { pttHeld = false; btn.classList.remove('holding'); return; }
+        if (session !== liveSession || !open || closing) {
+          await voice.stopListening();
+          pttHeld = false; btn.classList.remove('holding'); return;
+        }
         listeningActive = true;
+        listeningMode = 'ptt';
       }
       setStatus('Listening… release to send');
-    } catch (err) { toast(err.message); pttHeld = false; btn.classList.remove('holding'); }
+    } catch (err) {
+      if (session === liveSession) toast(err.message);
+      pttHeld = false; btn.classList.remove('holding');
+    }
   };
-  const up = () => {
+  const up = async () => {
     if (!pttHeld) return;
     pttHeld = false;
     btn.classList.remove('holding');
+    const pending = listeningPromise;
+    if (pending) { try { await pending; } catch { return; } }
+    if (!open || closing || !listeningActive || listeningMode !== 'ptt') return;
     voice.pttRelease();
     setStatus('Thinking…');
   };
@@ -317,10 +415,12 @@ function wirePtt() {
 
 /* ============================ conversation ============================ */
 function handleUserUtterance(text) {
-  if (!open || !text?.trim()) return;
+  if (!open || closing || !text?.trim()) return;
+  const session = liveSession;
   const anime = text.trim().match(/^\/anime\s+([a-z]+)/i);
   if (anime) { avatar?.performAction(anime[1].toLowerCase()); return; }
   bargeIn();
+  const turn = ++conversationTurn;
   store.addMessage('user', text, { live: true });
   if (!isReady()) {
     setStatus('Load a model in Model Hub to talk');
@@ -331,7 +431,6 @@ function handleUserUtterance(text) {
   setStatus('Thinking…');
   avatar?.performAction('think');
   assistantMsg = store.addMessage('assistant', '', { live: true });
-  const replyId = assistantMsg.id;
   rawReply = '';
   sentenceBuf = '';
   spokenConsumed = 0;
@@ -348,26 +447,21 @@ function handleUserUtterance(text) {
   const armStall = () => {
     if (thinkWatchdog) clearTimeout(thinkWatchdog);
     thinkWatchdog = setTimeout(() => {
-      if (!open) return;
-      if (gen) { gen.stop(); gen = null; }
-      if (assistantMsg) { store.updateMessage(assistantMsg.id, { content: rawReply }); assistantMsg = null; }
-      if (!rawReply.trim()) {
-        const msg = 'Sorry, that took too long. Please try again.';
-        store.updateMessage(replyId, { content: msg });
-        lastAnswer = msg; rawReply = msg; updateAnswerCard();
-        speakDirect(msg);
-      } else {
-        feedSpeech(null);
-      }
-      setStatus(mode === 'vad' && !muted ? 'Listening' : 'Ready');
+      if (session !== liveSession || turn !== conversationTurn || !open || !gen) return;
+      // A slow Omni turn is still a valid turn. Never force-stop it merely
+      // because a mobile device needs more than 30 seconds.
+      setStatus(gotToken ? 'Still generating…' : 'Still thinking…');
     }, 30000);
   };
-  thinkReassure = setTimeout(() => { if (!gotToken && open && gen) setStatus('Still thinking…'); }, 4000);
+  thinkReassure = setTimeout(() => {
+    if (!gotToken && open && gen && session === liveSession && turn === conversationTurn) setStatus('Still thinking…');
+  }, 4000);
   armStall();
 
   gen = generate({
     messages, thinking: thinkOn,
     onToken: tok => {
+      if (session !== liveSession || turn !== conversationTurn) return;
       if (!gotToken) { gotToken = true; if (thinkReassure) { clearTimeout(thinkReassure); thinkReassure = null; } }
       armStall();
       rawReply += tok;
@@ -375,8 +469,16 @@ function handleUserUtterance(text) {
       feedSpeech(content);
       paint();
     },
-    onDone: () => { gen = null; clearThinkWatchdog(); flushReply(); feedSpeech(null); lastAnswer = splitReasoning(rawReply).content; updateAnswerCard(); },
-    onError: e => { gen = null; clearThinkWatchdog(); flushReply(); toast(e.message); setStatus(mode === 'vad' && !muted ? 'Listening' : 'Ready'); },
+    onDone: () => {
+      if (session !== liveSession || turn !== conversationTurn) return;
+      gen = null; clearThinkWatchdog(); flushReply(); feedSpeech(null);
+      lastAnswer = splitReasoning(rawReply).content; updateAnswerCard();
+    },
+    onError: e => {
+      if (session !== liveSession || turn !== conversationTurn) return;
+      gen = null; clearThinkWatchdog(); flushReply(); toast(e.message);
+      setStatus(mode === 'vad' && !muted ? 'Listening' : 'Ready');
+    },
   });
 }
 
@@ -417,7 +519,10 @@ function enqueueSpeech(text) {
     .replace(/\s+/g, ' ')
     .trim();
   if (!clean) return;
-  speechQueue.push(clean);
+  // Bound pending utterances without dropping spoken content: if synthesis is
+  // slower than token generation, coalesce later clauses into one utterance.
+  if (speechQueue.length >= 6) speechQueue[speechQueue.length - 1] += ' ' + clean;
+  else speechQueue.push(clean);
   if (!speaking) speakNext();
 }
 
@@ -431,9 +536,13 @@ function speakNext() {
   }
   speaking = true;
   setStatus('Speaking');
+  const session = liveSession, turn = conversationTurn;
   voice.speak(text, {
-    onLevel: l => avatar?.setSpeaking(l),
-    onEnd: () => { speaking = false; avatar?.setSpeaking(0); speakNext(); },
+    onLevel: l => { if (session === liveSession && turn === conversationTurn) avatar?.setSpeaking(l); },
+    onEnd: () => {
+      if (session !== liveSession || turn !== conversationTurn) return;
+      speaking = false; avatar?.setSpeaking(0); speakNext();
+    },
   });
 }
 
@@ -475,10 +584,12 @@ export function initLive() {
   });
   on('app.background', () => {
     if (!open) return;
+    ++conversationTurn;
     avatar?.pause();
-    stopVad();
+    stopVad().catch(e => console.warn('background mic stop', e));
     voice.stopSpeech();
     speechQueue = [];
+    speaking = false;
     clearThinkWatchdog();
     if (gen) { gen.stop(); gen = null; flushReply(); }
   });
@@ -496,7 +607,7 @@ export function initLive() {
   // the singleton reloads safely on the next Live open.
   on('memory.pressure', p => {
     if (!avatar) return;
-    if (p && p.level === 'critical') { try { avatar.dispose(); } catch {} avatar = null; }
+    if (p && p.level === 'critical') { try { avatar.dispose(); } catch {} avatar = null; avatarInitPromise = null; avatarLoadFailed = false; }
     else avatar.pause();
   });
 }

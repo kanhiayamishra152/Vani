@@ -101,15 +101,26 @@ public final class Bridge {
             }
 
             case "system.copy": {
-                ClipboardManager cm = (ClipboardManager) act.getSystemService(Context.CLIPBOARD_SERVICE);
-                cm.setPrimaryClip(ClipData.newPlainText("Vani AI", a.getString("text")));
-                ok(id, null);
+                String text = a.getString("text");
+                act.main.post(() -> {
+                    try {
+                        ClipboardManager cm = (ClipboardManager) act.getSystemService(Context.CLIPBOARD_SERVICE);
+                        cm.setPrimaryClip(ClipData.newPlainText("Vani AI", text));
+                        ok(id, null);
+                    } catch (Exception e) { err(id, e.getMessage()); }
+                });
                 break;
             }
-            case "system.openExternal":
-                act.startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(a.getString("url"))));
-                ok(id, null);
+            case "system.openExternal": {
+                String url = a.getString("url");
+                act.main.post(() -> {
+                    try {
+                        act.startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+                        ok(id, null);
+                    } catch (Exception e) { err(id, e.getMessage()); }
+                });
                 break;
+            }
             case "system.setBackState":
                 act.setJsHandlesBack(a.optBoolean("handled", false));
                 ok(id, null);

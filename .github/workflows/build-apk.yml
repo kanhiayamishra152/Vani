@@ -294,7 +294,7 @@ jobs:
           if-no-files-found: error
 
       - name: Publish the Ultra-Light TTS pack release
-        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_release)
+        if: github.event_name == 'workflow_dispatch' && inputs.publish_release
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -317,7 +317,7 @@ jobs:
           fi
 
       - name: Mirror published assets to gofile.io
-        if: github.event_name != 'pull_request'
+        if: github.event_name == 'workflow_dispatch' && inputs.publish_release
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
@@ -334,7 +334,7 @@ jobs:
           bash scripts/upload-gofile.sh
 
       - name: Publish Release (immutable-safe, assets attached at creation)
-        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_release)
+        if: github.event_name == 'workflow_dispatch' && inputs.publish_release
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -365,8 +365,9 @@ jobs:
           else
             COUNT=$(gh release view "$RELEASE_TAG" --repo "$REPO" --json assets --jq '.assets | length')
             if [ "$COUNT" -ge 3 ]; then
-              # Already published with assets: only title/notes may be refreshed.
-              gh release edit "$RELEASE_TAG" --repo "$REPO" --title "Vani AI v1.5.1" --notes-file /tmp/body.md --latest
+              # An existing tag and its notes belong to the original immutable
+              # assets. Never attach this run's different hashes to that release.
+              echo "$RELEASE_TAG already published; preserving its assets and notes. Bump RELEASE_TAG for a new release."
             else
               echo "ERROR: $RELEASE_TAG exists with only $COUNT assets and is immutable; cannot add assets or reuse the tag. Bump RELEASE_TAG." >&2
               exit 1

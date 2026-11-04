@@ -404,6 +404,31 @@ async function main() {
       check(await responsive(), 'New Chat responds on first tap');
     });
 
+    await step('Stability: two-tier composer expands for focus and typing', async () => {
+      await page.click('#tabbar .tab[data-tab="chat"]');
+      check(await page.evaluate(() => document.querySelector('#composer-top-actions').contains(document.querySelector('#btn-live'))), 'idle Live control starts beside the compact input');
+      await page.focus('#composer-input');
+      await sleep(80);
+      check(await page.evaluate(() => document.querySelector('.composer-bar').classList.contains('expanded')), 'focus expands the composer');
+      check(await page.evaluate(() => document.querySelector('#composer-action-primary').contains(document.querySelector('#btn-live'))), 'focused Live control moves to the action row without duplication');
+      await page.waitForFunction(() => {
+        const row = document.querySelector('.composer-input-row').getBoundingClientRect();
+        const input = document.querySelector('.composer-input-wrap').getBoundingClientRect();
+        return input.width >= row.width - 2;
+      }, null, { timeout: 1500 });
+      check(true, 'focused input owns the full-width top row after its smooth transition');
+      await page.fill('#composer-input', 'Two tier layout'); await page.dispatchEvent('#composer-input', 'input');
+      check(await page.evaluate(() => document.querySelector('#composer-action-primary').contains(document.querySelector('#btn-send')) && !document.querySelector('#btn-send').hidden), 'typing keeps Send in the lower action row');
+      check(await page.evaluate(() => document.querySelector('#btn-auto-tts').textContent.includes('Audio Creation') && !!document.querySelector('#btn-think') && !!document.querySelector('#btn-mic')), 'Thinking, Audio Creation and Mic remain dedicated controls');
+      await page.evaluate(() => {
+        const input = document.querySelector('#composer-input');
+        input.value = ''; input.dispatchEvent(new Event('input', { bubbles: true })); input.blur();
+      });
+      await sleep(100);
+      check(await page.evaluate(() => !document.querySelector('.composer-bar').classList.contains('expanded') && document.querySelector('#composer-top-actions').contains(document.querySelector('#btn-live'))), 'empty blur restores the compact keyboard-safe layout');
+      check(await responsive(), 'composer remains responsive after expand/collapse');
+    });
+
     await step('v1.3.0: per-model thinking triangle + Send becomes Stop', async () => {
       await page.click('#tabbar .tab[data-tab="chat"]'); await sleep(120);
       await page.evaluate(() => window.__mockSetModel('Model A', '/models/a.gguf')); await sleep(80);

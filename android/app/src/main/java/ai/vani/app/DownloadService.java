@@ -9,6 +9,8 @@ import android.content.Context;
 import android.content.Intent;
 import android.os.Build;
 import android.os.IBinder;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.PowerManager;
 import android.util.Log;
 
@@ -33,6 +35,7 @@ import java.util.ArrayList;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 
 /**
  * Vani AI — resumable native model downloader.
@@ -54,7 +57,9 @@ public class DownloadService extends Service {
     private final ConcurrentHashMap<String, HttpURLConnection> liveConnections = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Thread> liveWorkers = new ConcurrentHashMap<>();
     private PowerManager.WakeLock wakeLock;
+    private final Handler main = new Handler(Looper.getMainLooper());
     private volatile boolean pumping = false;
+    private volatile boolean destroyed = false;
 
     public static void start(Context ctx, JSONObject args) throws Exception {
         Intent i = new Intent(ctx, DownloadService.class);
@@ -78,6 +83,7 @@ public class DownloadService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
+        destroyed = false;
         NotificationManager nm = getSystemService(NotificationManager.class);
         NotificationChannel ch = new NotificationChannel(CHANNEL, getString(R.string.download_channel), NotificationManager.IMPORTANCE_LOW);
         ch.setDescription(getString(R.string.download_channel_desc));
@@ -107,8 +113,17 @@ public class DownloadService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        if (intent == null) return START_NOT_STICKY;
+        if (intent == null || destroyed) return START_NOT_STICKY;
         String action = intent.getAction();
+        // Every command, including commands delivered after recreation, must
+        // enter the foreground before doing any other work.
+        try {
+            startForeground(notifId("summary"), buildSummary("Preparing download…"));
+        } catch (Throwable t) {
+            Log.e(TAG, "unable to enter foreground", t);
+            stopSelf(startId);
+            return START_NOT_STICKY;
+        }
         try {
             if (ACTION_START.equals(action)) {
                 JSONObject e = new JSONObject(intent.getStringExtra("entry"));
@@ -123,7 +138,6 @@ public class DownloadService extends Service {
                 liveMeta.put(id, e);
                 liveState.put(id, "queued");
                 Downloads.upsert(this, e);
-                startForeground(notifId("summary"), buildSummary("Preparing download…"));
                 emit("download.state", e.toString());
                 pump();
             } else if (ACTION_PAUSE.equals(action)) {
@@ -151,26 +165,51 @@ public class DownloadService extends Service {
     }
 
     private synchronized void pump() {
-        if (pumping) return;
+        if (pumping || destroyed || worker.isShutdown()) return;
         pumping = true;
-        worker.submit(() -> {
-            try {
-                acquireWake();
-                while (true) {
-                    Thread.interrupted();
-                    JSONObject next = null;
-                    for (JSONObject e : liveMeta.values()) {
-                        if ("queued".equals(liveState.get(e.optString("id")))) { next = e; break; }
+        try {
+            worker.submit(() -> {
+                try {
+                    acquireWake();
+                    while (!destroyed) {
+                        Thread.interrupted();
+                        JSONObject next = null;
+                        for (JSONObject e : liveMeta.values()) {
+                            if ("queued".equals(liveState.get(e.optString("id")))) { next = e; break; }
+                        }
+                        if (next == null) break;
+                        downloadWithRetry(next);
                     }
-                    if (next == null) break;
-                    downloadWithRetry(next);
+                } catch (Throwable t) {
+                    Log.e(TAG, "download worker failed", t);
+                    for (JSONObject e : liveMeta.values()) {
+                        String id = e.optString("id");
+                        String st = liveState.get(id);
+                        if ("queued".equals(st) || "downloading".equals(st)) {
+                            liveState.put(id, "paused");
+                            patchPersist(id, "state", "paused");
+                            patchPersist(id, "error", "Download interrupted safely — tap Resume");
+                            emitState(id);
+                        }
+                    }
+                } finally {
+                    releaseWake();
+                    synchronized (DownloadService.this) { pumping = false; }
+                    // A producer can queue work while this worker is exiting.
+                    if (hasQueued()) pump();
+                    else main.post(this::stopIfIdle);
                 }
-            } finally {
-                releaseWake();
-                pumping = false;
-                stopIfIdle();
-            }
-        });
+            });
+        } catch (RejectedExecutionException e) {
+            pumping = false;
+            Log.e(TAG, "download executor rejected work", e);
+        }
+    }
+
+    private boolean hasQueued() {
+        if (destroyed) return false;
+        for (String st : liveState.values()) if ("queued".equals(st)) return true;
+        return false;
     }
 
     private void acquireWake() {
@@ -228,82 +267,132 @@ public class DownloadService extends Service {
     private long downloadOne(JSONObject e, String url, File dest, long expected, long baseReceived, long totalAll) throws Exception {
         String id = e.getString("id");
         if (dest.exists() && expected > 0 && dest.length() == expected) return dest.length();
-        File part = new File(dest.getParentFile(), dest.getName() + ".part");
+        File parent = dest.getParentFile();
+        if (parent == null || (!parent.exists() && !parent.mkdirs()))
+            throw new IOException("Cannot create model directory");
+        File part = new File(parent, dest.getName() + ".part");
         long offset = part.exists() ? part.length() : 0;
-        if (expected > 0 && offset > expected) { part.delete(); offset = 0; }
+        if (expected > 0 && offset > expected) {
+            if (!part.delete()) throw new IOException("Cannot discard oversized partial file");
+            offset = 0;
+        }
+        if (expected > 0 && offset == expected) {
+            if (dest.exists() && !dest.delete()) throw new IOException("Cannot replace old model file");
+            if (!part.renameTo(dest)) throw new IOException("Cannot finalize completed partial file");
+            return expected;
+        }
 
-        // v1.3.0 security: HTTPS-only + strict host allowlist, with EVERY redirect
-        // hop re-validated so a malicious URL can never bounce to an evil host.
+        // HTTPS + host allowlist is checked on every redirect hop. Redirects are
+        // bounded and manually followed so a resume never bypasses this policy.
         if (!SafeFilename.isAllowedUrl(url)) throw new IOException("Blocked download URL (HTTPS + allowlist only)");
         String current = url;
         HttpURLConnection con = null;
-        int code = 0;
-        for (int hop = 0; hop < 6; hop++) {
-            con = (HttpURLConnection) new URL(current).openConnection();
-            con.setConnectTimeout(30000);
-            con.setReadTimeout(30000);
-            con.setInstanceFollowRedirects(false);
-            con.setRequestProperty("User-Agent", "VaniAI/1.5.1 (Android)");
-            if (offset > 0) con.setRequestProperty("Range", "bytes=" + offset + "-");
-            code = con.getResponseCode();
-            if (code == 301 || code == 302 || code == 303 || code == 307 || code == 308) {
-                String loc = con.getHeaderField("Location");
-                con.disconnect();
-                if (loc == null) throw new IOException("redirect without Location");
-                String next = new URL(new URL(current), loc).toString();
-                if (!SafeFilename.isAllowedUrl(next)) throw new IOException("Blocked redirect to disallowed host");
-                current = next;
-                continue;
-            }
-            break;
-        }
-        boolean append = code == 206;
-        if (code == 200 && offset > 0) { offset = 0; append = false; }
-        if (code != 200 && code != 206) throw new IOException("HTTP " + code);
-        if ("cancelled".equals(liveState.get(id))) { con.disconnect(); throw new CancelSignal(); }
-        liveConnections.put(id, con);
-
-        liveState.put(id, "downloading");
-        patchPersist(id, "state", "downloading");
-        if (totalAll > 0) patchPersist(id, "total", totalAll);
-        emitState(id);
-
-        long received = offset;
-        long lastEmit = 0, lastBytes = offset;
-        double speed = 0;
-        try (InputStream in = new BufferedInputStream(con.getInputStream(), 65536);
-             FileOutputStream out = new FileOutputStream(part, append)) {
-            byte[] buf = new byte[65536];
-            int n;
-            while ((n = in.read(buf)) > 0) {
-                String st = liveState.get(id);
-                if ("paused".equals(st)) {
-                    patchPersist(id, "received", baseReceived + received);
-                    patchPersist(id, "state", "paused");
-                    emitProgress(id, baseReceived + received, totalAll, 0, "paused");
-                    throw new PauseSignal();
+        try {
+            int code = 0;
+            for (int hop = 0; hop < 6; hop++) {
+                con = (HttpURLConnection) new URL(current).openConnection();
+                liveConnections.put(id, con);
+                con.setConnectTimeout(30000);
+                con.setReadTimeout(60000);
+                con.setInstanceFollowRedirects(false);
+                con.setRequestProperty("User-Agent", "VaniAI/1.5.1 (Android)");
+                con.setRequestProperty("Accept-Encoding", "identity");
+                if (offset > 0) con.setRequestProperty("Range", "bytes=" + offset + "-");
+                code = con.getResponseCode();
+                if (code == 301 || code == 302 || code == 303 || code == 307 || code == 308) {
+                    String loc = con.getHeaderField("Location");
+                    liveConnections.remove(id, con);
+                    con.disconnect();
+                    if (loc == null) throw new IOException("redirect without Location");
+                    String next = new URL(new URL(current), loc).toString();
+                    if (!SafeFilename.isAllowedUrl(next)) throw new IOException("Blocked redirect to disallowed host");
+                    current = next;
+                    continue;
                 }
-                if ("cancelled".equals(st)) { part.delete(); throw new CancelSignal(); }
-                out.write(buf, 0, n);
-                received += n;
-                long now = System.currentTimeMillis();
-                if (now - lastEmit >= 400) {
-                    double inst = (received - lastBytes) * 1000.0 / Math.max(1, now - lastEmit);
-                    speed = speed == 0 ? inst : speed * 0.7 + inst * 0.3;
-                    lastEmit = now; lastBytes = received;
-                    emitProgress(id, baseReceived + received, totalAll, speed, "downloading");
-                    patchPersist(id, "received", baseReceived + received);
-                    notifyProgress(e, baseReceived + received, totalAll, speed);
-                }
+                break;
             }
+            if (code != 200 && code != 206) throw new IOException("HTTP " + code);
+            if ("cancelled".equals(liveState.get(id))) throw new CancelSignal();
+            if (code == 206) validateContentRange(con.getHeaderField("Content-Range"), offset, expected);
+
+            boolean append = code == 206;
+            // A 200 response ignored Range: truncate, never append a full file to
+            // an existing part. A validated 206 starts at exactly our offset.
+            if (code == 200 && offset > 0) { offset = 0; append = false; }
+            long responseLength = con.getContentLengthLong();
+            if (expected > 0 && responseLength >= 0 && responseLength != expected - offset)
+                throw new IOException("Unexpected response length; partial file retained for safe retry");
+
+            liveState.put(id, "downloading");
+            patchPersist(id, "state", "downloading");
+            if (totalAll > 0) patchPersist(id, "total", totalAll);
+            emitState(id);
+
+            long received = offset;
+            long lastEmit = System.currentTimeMillis(), lastBytes = offset;
+            double speed = 0;
+            try (InputStream in = new BufferedInputStream(con.getInputStream(), 65536);
+                 FileOutputStream out = new FileOutputStream(part, append)) {
+                byte[] buf = new byte[65536];
+                int n;
+                while ((n = in.read(buf)) != -1) {
+                    String st = liveState.get(id);
+                    if ("paused".equals(st)) {
+                        patchPersist(id, "received", baseReceived + received);
+                        patchPersist(id, "state", "paused");
+                        emitProgress(id, baseReceived + received, totalAll, 0, "paused");
+                        throw new PauseSignal();
+                    }
+                    if ("cancelled".equals(st)) { part.delete(); throw new CancelSignal(); }
+                    out.write(buf, 0, n);
+                    received += n;
+                    long now = System.currentTimeMillis();
+                    if (now - lastEmit >= 400) {
+                        double inst = (received - lastBytes) * 1000.0 / Math.max(1, now - lastEmit);
+                        speed = speed == 0 ? inst : speed * 0.7 + inst * 0.3;
+                        lastEmit = now; lastBytes = received;
+                        emitProgress(id, baseReceived + received, totalAll, speed, "downloading");
+                        patchPersist(id, "received", baseReceived + received);
+                        notifyProgress(e, baseReceived + received, totalAll, speed);
+                    }
+                }
+                out.getFD().sync();
+            }
+            if ("cancelled".equals(liveState.get(id))) { part.delete(); throw new CancelSignal(); }
+            if (expected > 0 && received != expected)
+                throw new IOException("Unexpected EOF (" + received + "/" + expected + " bytes); resume will continue");
+            if (expected <= 0 && responseLength >= 0 && received - offset != responseLength)
+                throw new IOException("Truncated response; partial file retained");
+            if (dest.exists() && !dest.delete()) throw new IOException("Cannot replace old model file");
+            if (!part.renameTo(dest)) throw new IOException("rename failed");
+            return dest.length();
         } finally {
-            con.disconnect();
+            if (con != null) con.disconnect();
             liveConnections.remove(id);
         }
-        if ("cancelled".equals(liveState.get(id))) { part.delete(); throw new CancelSignal(); }
-        if (dest.exists()) dest.delete();
-        if (!part.renameTo(dest)) throw new IOException("rename failed");
-        return dest.length();
+    }
+
+    private static void validateContentRange(String value, long offset, long expected) throws IOException {
+        String prefix = "bytes " + offset + "-";
+        if (value == null || !value.startsWith(prefix))
+            throw new IOException("Server returned an invalid Content-Range; partial file retained");
+        int slash = value.indexOf('/');
+        int dash = value.indexOf('-', 5);
+        if (slash < 0 || dash < 0 || slash <= dash + 1) throw new IOException("Malformed Content-Range");
+        try {
+            long end = Long.parseLong(value.substring(dash + 1, slash).trim());
+            if (end < offset) throw new IOException("Invalid Content-Range end");
+            String totalText = value.substring(slash + 1).trim();
+            if ("*".equals(totalText)) {
+                if (expected > 0) throw new IOException("Server did not confirm the resumed file size");
+            } else {
+                long total = Long.parseLong(totalText);
+                if (total <= end || (expected > 0 && total != expected))
+                    throw new IOException("Content-Range total does not match the model manifest");
+            }
+        } catch (NumberFormatException e) {
+            throw new IOException("Malformed Content-Range", e);
+        }
     }
 
     private void download(JSONObject e) throws Exception {
@@ -317,6 +406,7 @@ public class DownloadService extends Service {
             JSONObject m = installed.optJSONObject(i);
             if (m == null) continue;
             if (m.optString("modelId").equals(e.optString("modelId"))
+                    && m.optString("kind").equals(e.optString("kind"))
                     && m.optString("quant").equals(e.optString("quant"))
                     && !m.optString("path").isEmpty() && new File(m.optString("path")).exists()) {
                 finishDone(e, id);
@@ -350,7 +440,7 @@ public class DownloadService extends Service {
                 String fileName = e.getString("fileName");
                 File fin = SafeFilename.safeChild(modelsDir, fileName);
                 long total = e.optLong("total", 0);
-                boolean haveComplete = fin.exists() && (total <= 0 || fin.length() >= total);
+                boolean haveComplete = fin.exists() && (total <= 0 || fin.length() == total);
                 if (!haveComplete) {
                     downloadOne(e, e.getString("url"), fin, total, 0, total);
                 }
@@ -635,6 +725,7 @@ public class DownloadService extends Service {
 
     @Override
     public void onDestroy() {
+        destroyed = true;
         for (HttpURLConnection con : liveConnections.values()) con.disconnect();
         liveConnections.clear();
         releaseWake();
