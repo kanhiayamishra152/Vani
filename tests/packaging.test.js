@@ -42,7 +42,7 @@ test('push CI builds artifacts without mutating immutable published releases', (
 test('explicit test releases use an independent tag and prerelease flag', () => {
   assert.match(workflow, /release_tag:\n\s+description:/);
   assert.match(workflow, /RELEASE_TAG: \$\{\{ inputs\.release_tag \|\| 'v1\.5\.1' \}\}/);
-  assert.match(workflow, /PRERELEASE: .*inputs\.prerelease/);
+  assert.match(workflow, /PRERELEASE: \$\{\{ inputs\.prerelease \}\}/);
   assert.match(workflow, /RELEASE_FLAGS=\(--prerelease\)/);
   assert.match(workflow, /--title "Vani AI \$RELEASE_TAG"/);
 });
