@@ -11,6 +11,14 @@ on:
         description: "Publish GitHub Release (v1.5.1)"
         type: boolean
         default: true
+      release_tag:
+        description: "Explicit tag to publish (use a unique tag for test builds)"
+        type: string
+        default: "v1.5.1"
+      prerelease:
+        description: "Mark this explicitly dispatched release as a pre-release"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -21,7 +29,7 @@ env:
   # never delete one to retry (that permanently burns the tag). APK is
   # versionName 1.5.1 / versionCode 7, signed with the committed v1 keystore so
   # it installs in-place over v1.0.1 with no uninstall.
-  RELEASE_TAG: "v1.5.1"
+  RELEASE_TAG: ${{ inputs.release_tag || 'v1.5.1' }}
   NODE_VERSION: "20"
   GRADLE_VERSION: "8.7"
   ANDROID_PLATFORM: "34"
@@ -338,6 +346,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
+          PRERELEASE: ${{ inputs.prerelease }}
         shell: bash
         run: |
           set -uo pipefail
@@ -353,7 +362,14 @@ jobs:
             printf '\n_Mirrors: gofile.io upload unavailable for this run._\n' >> /tmp/body.md
           fi
 
+          if [ "$PRERELEASE" = "true" ]; then
+            { printf '**Temporary test build** from commit `%s`. Not a production release.\n\n' "$GITHUB_SHA"; cat /tmp/body.md; } > /tmp/test-body.md
+            mv /tmp/test-body.md /tmp/body.md
+          fi
+
           ASSETS=(dist/vani-ai-1.5.1-release.apk dist/vani-ai-1.5.1-source.zip dist/SHA256SUMS.txt)
+          RELEASE_FLAGS=(--latest)
+          if [ "$PRERELEASE" = "true" ]; then RELEASE_FLAGS=(--prerelease); fi
 
           if ! gh release view "$RELEASE_TAG" --repo "$REPO" >/dev/null 2>&1; then
             # Immutable-safe: passing files to `gh release create` makes it create
@@ -361,7 +377,7 @@ jobs:
             # before the release seals. (Create-empty-then-upload is rejected 422.)
             # NEVER delete an immutable release to retry: that burns the tag name.
             gh release create "$RELEASE_TAG" --repo "$REPO" --target "$GITHUB_SHA" \
-              --title "Vani AI v1.5.1" --notes-file /tmp/body.md --latest "${ASSETS[@]}"
+              --title "Vani AI $RELEASE_TAG" --notes-file /tmp/body.md "${RELEASE_FLAGS[@]}" "${ASSETS[@]}"
           else
             COUNT=$(gh release view "$RELEASE_TAG" --repo "$REPO" --json assets --jq '.assets | length')
             if [ "$COUNT" -ge 3 ]; then
