@@ -95,7 +95,7 @@ if [ -n "$SDK" ] && [ -n "$GRADLE" ]; then
         --out "$OUT" "$ALIGNED"
       rm -f "$ALIGNED"
       "$BT/zipalign" -c -p 4 "$OUT"
-      "$BT/apksigner" verify --verbose --print-certs "$OUT"
+      "$BT/apksigner" verify --verbose --min-sdk-version 23 --print-certs "$OUT"
       echo "APK aligned; v1 + v2 signatures verified"
     else
       cp "$RAW" "$DIST/vani-ai-1.5.1-release.apk"

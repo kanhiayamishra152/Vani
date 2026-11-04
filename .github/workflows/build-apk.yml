@@ -227,7 +227,9 @@ jobs:
               print(f'Validated {len(libs)} compressed JNI libraries for {sorted(abis)}; original VRM is STORED')
           PY
 
-          "$BT/apksigner" verify --verbose --print-certs "$OUT" | tee /tmp/vani-apk-signature.txt
+          # Force verification of the legacy-compatible signature too. With the
+          # manifest's minSdk 26, apksigner otherwise skips v1-only checks.
+          "$BT/apksigner" verify --verbose --min-sdk-version 23 --print-certs "$OUT" | tee /tmp/vani-apk-signature.txt
           grep -F 'Verified using v1 scheme (JAR signing): true' /tmp/vani-apk-signature.txt
           grep -F 'Verified using v2 scheme (APK Signature Scheme v2): true' /tmp/vani-apk-signature.txt
           APK_CERT=$("$BT/apksigner" verify --print-certs "$OUT" | sed -nE 's/^Signer #1 certificate SHA-256 (digest|fingerprint): //p' | head -1 | tr 'A-F' 'a-f')
