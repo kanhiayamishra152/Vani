@@ -10,8 +10,8 @@ test('installer hotfix preserves package identity, ARM64 support and versionCode
   assert.match(gradle, /applicationId 'ai\.vani\.app'/);
   assert.match(gradle, /minSdk 26/);
   assert.match(gradle, /targetSdk 34/);
-  assert.match(gradle, /versionCode 7/);
-  assert.match(gradle, /versionName '1\.5\.1'/);
+  assert.match(gradle, /versionCode 8/);
+  assert.match(gradle, /versionName '1\.5\.2-test-b3b36de'/);
   assert.match(gradle, /abiFilters 'arm64-v8a'/);
 });
 
@@ -30,6 +30,8 @@ test('CI blocks publication unless final APK parsing and certificate identity pa
   assert.match(workflow, /Verified using v2 scheme/);
   assert.match(workflow, /APK_CERT.*KEY_CERT|APK_CERT" != "\$KEY_CERT/);
   assert.match(workflow, /original OC-Lily\.vrm missing from final APK/);
+  assert.match(workflow, /OUT=dist\/vani-ai-1\.5\.2-test-b3b36de\.apk/);
+  assert.match(workflow, /versionCode='8' versionName='1\.5\.2-test-b3b36de'/);
 });
 
 test('push CI builds artifacts without mutating immutable published releases', () => {

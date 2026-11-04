@@ -27,7 +27,7 @@ permissions:
 env:
   # Release tag for this build. Immutable releases seal their assets at creation;
   # never delete one to retry (that permanently burns the tag). APK is
-  # versionName 1.5.1 / versionCode 7, signed with the committed v1 keystore so
+  # versionName 1.5.2-test-b3b36de / versionCode 8, signed with the committed v1 keystore so
   # it installs in-place over v1.0.1 with no uninstall.
   RELEASE_TAG: ${{ inputs.release_tag || 'v1.5.1' }}
   NODE_VERSION: "20"
@@ -191,11 +191,11 @@ jobs:
             BT=$(dirname "$(find "$ANDROID_HOME/build-tools" -name zipalign 2>/dev/null | sort -V | tail -1)")
           fi
           RAW=$(find android/app/build/outputs/apk/release -name '*.apk' | head -1)
-          OUT=dist/vani-ai-1.5.1-release.apk
+          OUT=dist/vani-ai-1.5.2-test-b3b36de.apk
           echo "RAW=$RAW"; echo "BT=$BT"
           # Canonical release packaging: align first, then force both signatures.
           # AGP can emit v2-only APKs for minSdk 26 even when v1 is requested.
-          ALIGNED=/tmp/vani-ai-1.5.1-aligned.apk
+          ALIGNED=/tmp/vani-ai-1.5.2-test-b3b36de-aligned.apk
           "$BT/zipalign" -f -p 4 "$RAW" "$ALIGNED"
           SP=$(grep '^storePassword=' android/keystore.properties | cut -d= -f2-)
           KP=$(grep '^keyPassword=' android/keystore.properties | cut -d= -f2-)
@@ -212,7 +212,7 @@ jobs:
           AAPT="$BT/aapt"
           "$AAPT" dump badging "$OUT" > /tmp/vani-badging.txt
           "$AAPT" dump xmltree "$OUT" AndroidManifest.xml > /tmp/vani-manifest.txt
-          grep -F "package: name='ai.vani.app' versionCode='7' versionName='1.5.1'" /tmp/vani-badging.txt
+          grep -F "package: name='ai.vani.app' versionCode='8' versionName='1.5.2-test-b3b36de'" /tmp/vani-badging.txt
           grep -F "sdkVersion:'26'" /tmp/vani-badging.txt
           grep -F "targetSdkVersion:'34'" /tmp/vani-badging.txt
           grep -F "native-code: 'arm64-v8a'" /tmp/vani-badging.txt
@@ -281,24 +281,24 @@ jobs:
       - name: SHA-256 hashes
         run: |
           cd dist
-          sha256sum vani-ai-1.5.1-release.apk vani-ai-1.5.1-source.zip | tee SHA256SUMS.txt
+          sha256sum vani-ai-1.5.2-test-b3b36de.apk vani-ai-1.5.2-test-b3b36de-source.zip | tee SHA256SUMS.txt
           cd ..
           sha256sum dist-tts/phonon-ultralight-8m-int8.tar.bz2 | sed 's#dist-tts/##' | tee -a dist/SHA256SUMS.txt
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: vani-ai-1.5.1-release-apk
+          name: vani-ai-1.5.2-test-b3b36de-apk
           path: |
-            dist/vani-ai-1.5.1-release.apk
+            dist/vani-ai-1.5.2-test-b3b36de.apk
             dist/SHA256SUMS.txt
           if-no-files-found: error
 
       - name: Upload source ZIP artifact
         uses: actions/upload-artifact@v4
         with:
-          name: vani-ai-1.5.1-source
-          path: dist/vani-ai-1.5.1-source.zip
+          name: vani-ai-1.5.2-test-b3b36de-source
+          path: dist/vani-ai-1.5.2-test-b3b36de-source.zip
           if-no-files-found: error
 
       - name: Publish the Ultra-Light TTS pack release
@@ -336,7 +336,7 @@ jobs:
           # upload the freshly built dist assets.
           if gh release view "$RELEASE_TAG" --repo "$REPO" >/dev/null 2>&1; then
             gh release download "$RELEASE_TAG" --repo "$REPO" \
-              -p 'vani-ai-1.5.1-release.apk' -p 'vani-ai-1.5.1-source.zip' -p 'SHA256SUMS.txt' \
+              -p 'vani-ai-1.5.2-test-b3b36de.apk' -p 'vani-ai-1.5.2-test-b3b36de-source.zip' -p 'SHA256SUMS.txt' \
               -D dist --clobber || true
           fi
           bash scripts/upload-gofile.sh
@@ -367,7 +367,7 @@ jobs:
             mv /tmp/test-body.md /tmp/body.md
           fi
 
-          ASSETS=(dist/vani-ai-1.5.1-release.apk dist/vani-ai-1.5.1-source.zip dist/SHA256SUMS.txt)
+          ASSETS=(dist/vani-ai-1.5.2-test-b3b36de.apk dist/vani-ai-1.5.2-test-b3b36de-source.zip dist/SHA256SUMS.txt)
           RELEASE_FLAGS=(--latest)
           if [ "$PRERELEASE" = "true" ]; then RELEASE_FLAGS=(--prerelease); fi
 

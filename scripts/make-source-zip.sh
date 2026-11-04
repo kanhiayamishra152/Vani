@@ -3,9 +3,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p dist
-OUT="dist/vani-ai-1.5.1-source.zip"
+OUT="dist/vani-ai-1.5.2-test-b3b36de-source.zip"
 if git rev-parse --verify HEAD >/dev/null 2>&1 && [ -n "$(git ls-files)" ]; then
-  git archive --format=zip --prefix=vani-ai-1.5.1/ -o "$OUT" HEAD
+  git archive --format=zip --prefix=vani-ai-1.5.2-test-b3b36de/ -o "$OUT" HEAD
 else
   zip -qr "$OUT" . -x "node_modules/*" "third_party/*" "dist/*" ".git/*"
 fi

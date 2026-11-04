@@ -1,25 +1,21 @@
-## Vani AI v1.5.1 — installer compatibility hotfix
+## Vani AI v1.5.2-test-b3b36de — physical-device test build
 
-**Install in place — no uninstall required.** v1.5.1 (`versionCode 7`) contains every v1.5.0 feature and is signed with the exact tracked `android/vani-v1.jks` identity. Downloaded models, chats and settings are not removed by the update.
+**Temporary test build; not a production release.** Install in place without uninstalling. `versionCode 8` distinguishes this APK from the earlier `versionCode 7` test package. It remains signed with the established `android/vani-v1.jks` identity so chats, settings and downloaded models can be preserved by an in-place update.
 
-### Install/package fixes
+### Changes under test
 
-- Uses conservative extractable JNI-library packaging for Android and MIUI package installers; `extractNativeLibs=true` is verified in the final binary manifest.
-- Uses both JAR/v1 and APK Signature Scheme v2 signatures with the established certificate. CI rejects any certificate mismatch instead of publishing an incompatible update.
-- Validates the final APK with Android `aapt`: package `ai.vani.app`, versionCode 7, versionName 1.5.1, minimum Android 8.0 (API 26), target API 34 and native `arm64-v8a` support.
-- Checks ZIP CRCs, 4-byte alignment, native-library compression, v1/v2 signatures and original-VRM storage before release publication.
-- Keeps the original `OC-Lily.vrm` uncompressed and preserves all inference, model-memory, Omni, TTS/ASR, Live Talk and avatar behavior from v1.5.0.
+- Lifecycle-safe microphone, ASR/VAD, decoding, system TTS, LLM and Live Talk cleanup.
+- Native Java/Kotlin/C++ exception and ownership hardening.
+- Bounded resumable downloads and atomic model registry persistence.
+- Frame-rate-aware avatar rendering and robust Live WebGL reopen behavior.
+- Responsive two-tier chat composer with the existing model, speech and Live features retained.
 
-### v1.5.0 fixes retained
+### Package verification
 
-- Empty stop strings no longer suppress the first token; split UTF-8 output and stop prefixes are buffered safely.
-- Explicit file-preserving LLM/TTS/ASR unload controls and real On disk versus In RAM state.
-- One Main LLM plus one standalone TTS and ASR, with full Omni isolation before allocation.
-- Reliable native microphone startup, cancellable Preview Voice and clause-by-clause streaming speech.
-- Existing battery-saver FPS controls, background audio teardown and native lifecycle protections remain enabled.
+- The final APK must report package `ai.vani.app`, `versionCode 8`, versionName `1.5.2-test-b3b36de`, minimum Android 8.0 (API 26), target API 34 and native `arm64-v8a` support through Android `aapt`.
+- CI checks ZIP integrity, 4-byte alignment, extractable native libraries, the original uncompressed VRM, both v1/v2 signatures and the established signing certificate before publication.
+- Unit, synthetic-rig and interactive browser checks must pass before the APK is attached.
 
-### Verification and installation
+### Installation
 
-CI compiles the native/Android app, runs unit, synthetic-rig and 110 interactive checks, parses the final APK with Android tooling, verifies its signature against the tracked key, and publishes only after all gates pass. Google Play Protect is a separate on-device service; its proprietary scan cannot be run or guaranteed by this repository's CI.
-
-Download `vani-ai-1.5.1-release.apk` directly from this release. Avoid renaming or partially downloading the file, and compare its SHA-256 below before installing. The APK supports 64-bit ARM devices running Android 8.0 or later.
+Download `vani-ai-1.5.2-test-b3b36de.apk` directly from this release. Do not rename or partially download the file; compare its SHA-256 below before installing. The APK supports 64-bit ARM devices running Android 8.0 or later. Google Play Protect is a separate on-device service and its scan result is not claimed by CI.
