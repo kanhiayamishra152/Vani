@@ -101,13 +101,6 @@ test('Live slow-turn watchdog reports status without force-stopping generation',
   assert.match(watchdog, /Still generating/);
 });
 
-test('push CI cannot rewrite an existing immutable release', () => {
-  const workflow = fs.readFileSync(new URL('../.github/workflows/build-apk.yml', import.meta.url), 'utf8');
-  assert.doesNotMatch(workflow, /if: github\.event_name == 'push' \|\|/);
-  assert.doesNotMatch(workflow, /gh release edit/);
-  assert.match(workflow, /preserving its assets and notes/);
-});
-
 test('fatal guard has no watchdog process-kill path and Activity no longer owns a cached thread pool', () => {
   const guard = fs.readFileSync(new URL('../android/app/src/main/java/ai/vani/app/CrashGuard.java', import.meta.url), 'utf8');
   const activity = fs.readFileSync(new URL('../android/app/src/main/java/ai/vani/app/MainActivity.java', import.meta.url), 'utf8');

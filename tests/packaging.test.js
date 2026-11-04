@@ -11,7 +11,7 @@ test('installer hotfix preserves package identity, ARM64 support and versionCode
   assert.match(gradle, /minSdk 26/);
   assert.match(gradle, /targetSdk 34/);
   assert.match(gradle, /versionCode 8/);
-  assert.match(gradle, /versionName '1\.5\.2-test-b3b36de'/);
+  assert.match(gradle, /versionName '1\.5\.2'/);
   assert.match(gradle, /abiFilters 'arm64-v8a'/);
 });
 
@@ -30,21 +30,15 @@ test('CI blocks publication unless final APK parsing and certificate identity pa
   assert.match(workflow, /Verified using v2 scheme/);
   assert.match(workflow, /APK_CERT.*KEY_CERT|APK_CERT" != "\$KEY_CERT/);
   assert.match(workflow, /original OC-Lily\.vrm missing from final APK/);
-  assert.match(workflow, /OUT=dist\/vani-ai-1\.5\.2-test-b3b36de\.apk/);
-  assert.match(workflow, /versionCode='8' versionName='1\.5\.2-test-b3b36de'/);
+  assert.match(workflow, /OUT=dist\/vani-ai-1\.5\.2-release\.apk/);
+  assert.match(workflow, /versionCode='8' versionName='1\.5\.2'/);
 });
 
-test('push CI builds artifacts without mutating immutable published releases', () => {
-  assert.doesNotMatch(workflow, /if: github\.event_name == 'push' \|\|/);
-  assert.doesNotMatch(workflow, /gh release edit/);
-  assert.match(workflow, /preserving its assets and notes\. Bump RELEASE_TAG/);
-  assert.match(workflow, /if: github\.event_name == 'workflow_dispatch' && inputs\.publish_release/);
-});
-
-test('explicit test releases use an independent tag and prerelease flag', () => {
-  assert.match(workflow, /release_tag:\n\s+description:/);
-  assert.match(workflow, /RELEASE_TAG: \$\{\{ inputs\.release_tag \|\| 'v1\.5\.1' \}\}/);
-  assert.match(workflow, /PRERELEASE: .*inputs\.prerelease/);
-  assert.match(workflow, /RELEASE_FLAGS=\(--prerelease\)/);
-  assert.match(workflow, /--title "Vani AI \$RELEASE_TAG"/);
+test('verified pushes publish the standard versioned GitHub release directly', () => {
+  assert.match(workflow, /RELEASE_TAG: "v1\.5\.2"/);
+  assert.match(workflow, /if: github\.event_name == 'push' \|\| \(github\.event_name == 'workflow_dispatch' && inputs\.publish_release\)/);
+  assert.match(workflow, /gh release create "\$RELEASE_TAG"/);
+  assert.match(workflow, /--title "Vani AI v1\.5\.2" --notes-file \/tmp\/body\.md --latest/);
+  assert.match(workflow, /ASSETS=\(dist\/vani-ai-1\.5\.2-release\.apk dist\/vani-ai-1\.5\.2-source\.zip dist\/SHA256SUMS\.txt\)/);
+  assert.doesNotMatch(workflow, /TEST_PUBLISH|inputs\.release_tag|PRERELEASE|\[publish-test\]/);
 });
