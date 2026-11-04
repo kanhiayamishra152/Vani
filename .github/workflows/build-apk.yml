@@ -30,6 +30,7 @@ env:
   # versionName 1.5.1 / versionCode 7, signed with the committed v1 keystore so
   # it installs in-place over v1.0.1 with no uninstall.
   RELEASE_TAG: ${{ inputs.release_tag || 'v1.5.1' }}
+  TEST_PUBLISH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/arena/5734595f-vani' && startsWith(github.event.head_commit.message, '[publish-test]') }}
   NODE_VERSION: "20"
   GRADLE_VERSION: "8.7"
   ANDROID_PLATFORM: "34"
@@ -342,11 +343,12 @@ jobs:
           bash scripts/upload-gofile.sh
 
       - name: Publish Release (immutable-safe, assets attached at creation)
-        if: github.event_name == 'workflow_dispatch' && inputs.publish_release
+        if: (github.event_name == 'workflow_dispatch' && inputs.publish_release) || env.TEST_PUBLISH == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          PRERELEASE: ${{ inputs.prerelease }}
+          RELEASE_TAG: ${{ env.TEST_PUBLISH == 'true' && 'test-build-b3b36de' || inputs.release_tag || 'v1.5.1' }}
+          PRERELEASE: ${{ inputs.prerelease || env.TEST_PUBLISH == 'true' }}
         shell: bash
         run: |
           set -uo pipefail
